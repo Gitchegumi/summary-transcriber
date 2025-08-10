@@ -12,17 +12,17 @@ The audio is captured using the [craig.chat](https://craig.chat/) bot for Discor
 
 The script performs the following steps:
 
-1.  **Gets Audio Files**: It prompts the user for the path to a folder containing audio files.
-2.  **Creates Output Directory**: It creates a `transcript` subdirectory within the audio folder to store the output.
-3.  **Transcribes Audio**: It uses the `whisper` command-line tool to transcribe each audio file. It looks for files named `1-*` with common audio extensions (`.flac`, `.mp3`, `.wav`, `.m4a`, `.ogg`), corresponding to the number of tracks you specify.
-4.  **Renames Speaker Files**: After transcription, it prompts the user to enter a speaker name for each generated `.vtt` file, renaming the files accordingly.
-5.  **Merges Transcripts**: It parses the VTT files, combines them, sorts the entries by timestamp, and saves the final merged transcript as `merged.csv` in the `transcript` folder.
+1. **Gets Audio Files**: It prompts the user for the path to a folder containing audio files.
+2. **Creates Output Directory**: It creates a `transcript` subdirectory within the audio folder to store the output.
+3. **Transcribes Audio**: It uses the `whisper` command-line tool to transcribe each audio file. It looks for files named `1-*` with common audio extensions (`.flac`, `.mp3`, `.wav`, `.m4a`, `.ogg`), corresponding to the number of tracks you specify.
+4. **Renames Speaker Files**: After transcription, it prompts the user to enter a speaker name for each generated `.vtt` file, renaming the files accordingly.
+5. **Merges Transcripts**: It parses the VTT files, combines them, sorts the entries by timestamp, and saves the final merged transcript as `merged.csv` in the `transcript` folder.
 
 ## Requirements
 
-*   Python 3.8+
-*   [FFmpeg](https://ffmpeg.org/download.html)
-*   [OpenAI Whisper](https://github.com/openai/whisper)
+- Python 3.8+
+- [FFmpeg](https://ffmpeg.org/download.html)
+- [OpenAI Whisper](https://github.com/openai/whisper)
 
 ## Setup and Usage
 
@@ -37,11 +37,11 @@ cd summary-transcriber
 
 It's highly recommended to use a virtual environment to manage dependencies.
 
-**On Windows:**
+**On Windows (Power Shell):**
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 ```
 
 **On macOS and Linux:**
@@ -75,8 +75,9 @@ sudo apt update && sudo apt install ffmpeg
 
 ### 4. Install Whisper
 
-
 You can install Whisper using pip:
+
+[> [!NOTE] Make sure your venv is active before running this step
 
 ```bash
 pip install git+https://github.com/openai/whisper.git
