@@ -152,10 +152,16 @@ def main():
         # 4. Loop over tracks and transcribe
         for i in range(1, num_tracks + 1):
             # Find the audio file for the current track number
-            files = list(input_dir.glob(f"{i}-*.flac"))
+            audio_extensions = [".flac", ".mp3", ".wav", ".m4a", ".ogg"]
+            files = []
+            for ext in audio_extensions:
+                files.extend(input_dir.glob(f"{i}-*{ext}"))
+
             if not files:
-                print(f"No file found for track {i} (pattern: {i}-*.flac). Skipping.")
+                print(f"No file found for track {i} (pattern: {i}-*.[flac, mp3, wav, m4a, ogg]). Skipping.")
                 continue
+
+            print(f"Found {len(files)} files for track {i}: {[f.name for f in files]}")
             
             audio_file = files[0]
             print(f"\nStarting transcription for: {audio_file.name}")
