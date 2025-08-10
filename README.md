@@ -77,7 +77,7 @@ sudo apt update && sudo apt install ffmpeg
 
 You can install Whisper using pip:
 
-[> [!NOTE] Make sure your venv is active before running this step
+> [!NOTE] Make sure your venv is active before running this step
 
 ```bash
 pip install git+https://github.com/openai/whisper.git
