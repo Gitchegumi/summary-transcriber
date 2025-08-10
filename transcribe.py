@@ -137,43 +137,39 @@ def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"Output will be saved to: {output_dir}")
 
-        # 3. Get the number of tracks
-        while True:
-            try:
-                num_tracks_str = input("Enter the number of tracks you recorded: ")
-                num_tracks = int(num_tracks_str)
-                if num_tracks > 0:
-                    break
-                else:
-                    print("Please enter a positive number.")
-            except ValueError:
-                print("Invalid input. Please enter a number.")
+        # 3. Find all audio files in the directory
+        audio_extensions = [".flac", ".mp3", ".wav", ".m4a", ".ogg"]
+        audio_files = []
+        for ext in audio_extensions:
+            audio_files.extend(input_dir.glob(f"*{ext}"))
+
+        if not audio_files:
+            print(f"No audio files found in '{input_dir}'.")
+            sys.exit(1)
+
+        print(f"Found {len(audio_files)} audio files to transcribe:")
+        for f in audio_files:
+            print(f"  - {f.name}")
 
         # 4. Loop over tracks and transcribe
-        for i in range(1, num_tracks + 1):
-            # Find the audio file for the current track number
-            audio_extensions = [".flac", ".mp3", ".wav", ".m4a", ".ogg"]
-            files = []
-            for ext in audio_extensions:
-                files.extend(input_dir.glob(f"{i}-*{ext}"))
-
-            if not files:
-                print(f"No file found for track {i} (pattern: {i}-*.[flac, mp3, wav, m4a, ogg]). Skipping.")
-                continue
-
-            print(f"Found {len(files)} files for track {i}: {[f.name for f in files]}")
-            
-            audio_file = files[0]
+        for audio_file in audio_files:
             print(f"\nStarting transcription for: {audio_file.name}")
 
             try:
-                subprocess.run([
+                process = subprocess.Popen([
                     "whisper",
-                    str(audio_file),
+                    str(audio_file.name),
                     "--model", "large",
                     "--device", "cuda",
                     "--output_dir", str(output_dir)
-                ], check=True)
+                ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', bufsize=1)
+
+                for line in iter(process.stdout.readline, ''):
+                    print(line, end='')
+
+                process.wait()
+                if process.returncode != 0:
+                    raise subprocess.CalledProcessError(process.returncode, process.args)
                 print(f"Finished transcription for: {audio_file.name}")
             except subprocess.CalledProcessError as e:
                 print(f"Error during transcription for {audio_file.name}: {e}")
@@ -194,6 +190,7 @@ def main():
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
         sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

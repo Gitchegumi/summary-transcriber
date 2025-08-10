@@ -77,13 +77,13 @@ sudo apt update && sudo apt install ffmpeg
 
 You can install Whisper using pip:
 
-> [!NOTE] Make sure your venv is active before running this step
+> [NOTE] Make sure your venv is active before running this step
 
 ```bash
 pip install git+https://github.com/openai/whisper.git
 ```
 
-For better performance, especially with larger models, a CUDA-capable NVIDIA GPU is recommended. Ensure you have the correct version of PyTorch installed for your system by following the instructions on the [PyTorch website](https://pytorch.org/).
+For better performance, especially with larger models, a CUDA-capable NVIDIA GPU is recommended. Ensure you have the correct version of PyTorch installed for your system by following the instructions on the [PyTorch website](https://pytorch.org/get-started/locally/).
 
 ### 5. Run the Script
 
@@ -93,4 +93,6 @@ Once the setup is complete, you can run the script:
 python transcribe.py
 ```
 
-The script will guide you through the process of selecting your audio folder and specifying the number of tracks.
+The script will then guide you through the process of selecting your audio folder.
+
+> [NOTE] When prompted for the folder path, do not include quotes around the path.
