@@ -7,6 +7,7 @@ from pathlib import Path
 
 # --- Functions from merge_vtt.py ---
 
+
 def parse_vtt(file_path):
     """
     Parse a VTT file into a list of tuples: (start_time, text, speaker).
@@ -37,6 +38,7 @@ def parse_vtt(file_path):
 
     return entries
 
+
 def pad_time_string(t):
     """
     Ensure time strings are in hh:mm:ss.mmm format by adding hours if missing.
@@ -44,6 +46,7 @@ def pad_time_string(t):
     if re.match(r"^\d{2}:\d{2}\.\d{3}$", t):
         return f"00:{t}"
     return t
+
 
 def time_to_seconds(t):
     """
@@ -53,6 +56,7 @@ def time_to_seconds(t):
     h, m, s = t.split(":")
     s, ms = s.split(".")
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
 
 def merge_transcripts(vtt_folder, output_file="merged.csv"):
     """
@@ -75,49 +79,59 @@ def merge_transcripts(vtt_folder, output_file="merged.csv"):
 
     # Write to CSV
     output_path = folder / output_file
-    with open(output_path, "w", newline='', encoding="utf-8") as f:
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Time", "Speaker", "Text"])
         writer.writerows(sorted_entries)
 
     print(f"Merged {len(sorted_entries)} total lines into {output_path}")
 
+
 # --- New function for renaming files ---
 
-def rename_vtt_files(output_dir):
+
+def rename_vtt_files(source_dir, dest_dir):
     """
-    Asks the user for new speaker names for each VTT file and renames the files.
+    Asks the user for new speaker names for each VTT file and saves the renamed
+    files to the destination directory.
     """
     print("\n--- Rename Speaker Files ---")
     print("Enter a new name for each speaker. Press Enter to keep the original name.")
 
-    vtt_files = sorted(list(output_dir.glob("*.vtt")))
+    vtt_files = sorted(list(source_dir.glob("*.vtt")))
     if not vtt_files:
         print("No .vtt files found to rename.")
         return
 
     for vtt_file in vtt_files:
+        original_name = vtt_file.stem
         while True:
             try:
                 new_speaker_name = input(f"  Speaker for '{vtt_file.name}': ")
                 if not new_speaker_name.strip():
-                    print(f"    Keeping original name: {vtt_file.stem}")
-                    break  # Keep original name and move to the next file
+                    new_speaker_name = original_name
+                    print(f"    Keeping original name: {original_name}")
 
-                new_file_path = vtt_file.with_name(f"{new_speaker_name}.vtt")
+                new_file_path = dest_dir / f"{new_speaker_name}.vtt"
 
                 if new_file_path.exists():
-                    print(f"    Error: A file named '{new_file_path.name}' already exists. Please choose a different name.")
+                    print(
+                        f"    Error: A file named '{new_file_path.name}' already exists in '{dest_dir}'. Please choose a different name."
+                    )
                     continue  # Ask again for a new name
 
+                # Rename (move) the file to the new directory with the new name
                 vtt_file.rename(new_file_path)
-                print(f"    Renamed to: {new_file_path.name}")
+                print(f"    Saved and renamed to: {new_file_path}")
                 break  # Success, move to the next file
             except OSError as e:
                 print(f"    Error renaming file: {e}")
-                break # Exit loop for this file on error
+                break  # Exit loop for this file on error
+
+
 
 # --- Main transcription logic ---
+
 
 def main():
     """
@@ -132,12 +146,23 @@ def main():
             print(f"Error: The folder '{input_dir}' does not exist.")
             sys.exit(1)
 
-        # 2. Create the output directory
-        output_dir = input_dir / "transcript"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output will be saved to: {output_dir}")
+        # 2. Create output directories
+        transcript_dir = input_dir / "transcript"
+        merged_dir = input_dir / "merged"
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Transcript files will be saved to: {transcript_dir}")
+        print(f"Merged output will be saved to: {merged_dir}")
 
-        # 3. Find all audio files in the directory
+        # 3. Get model size from user
+        model_sizes = ["tiny", "base", "small", "medium", "large", "turbo"]
+        model_prompt = f"Please choose a model size ({', '.join(model_sizes)}). Press Enter for default (turbo): "
+        selected_model = input(model_prompt).strip().lower()
+        if not selected_model or selected_model not in model_sizes:
+            selected_model = "turbo"
+        print(f"Using model size: {selected_model}")
+
+        # 4. Find all audio files in the directory
         audio_extensions = [".flac", ".mp3", ".wav", ".m4a", ".ogg"]
         audio_files = []
         for ext in audio_extensions:
@@ -151,41 +176,55 @@ def main():
         for f in audio_files:
             print(f"  - {f.name}")
 
-        # 4. Loop over tracks and transcribe
+        # 5. Loop over tracks and transcribe
         for audio_file in audio_files:
             print(f"\nStarting transcription for: {audio_file.name}")
 
             try:
-                process = subprocess.Popen([
-                    "whisper",
-                    str(audio_file.name),
-                    "--model", "large",
-                    "--device", "cuda",
-                    "--output_dir", str(output_dir)
-                ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', bufsize=1)
+                process = subprocess.Popen(
+                    [
+                        "whisper",
+                        str(audio_file),
+                        "--model",
+                        selected_model,
+                        "--device",
+                        "cuda",
+                        "--output_dir",
+                        str(transcript_dir),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                )
 
-                for line in iter(process.stdout.readline, ''):
-                    print(line, end='')
+                for line in iter(process.stdout.readline, ""):
+                    print(line, end="")
 
                 process.wait()
                 if process.returncode != 0:
-                    raise subprocess.CalledProcessError(process.returncode, process.args)
+                    raise subprocess.CalledProcessError(
+                        process.returncode, process.args
+                    )
                 print(f"Finished transcription for: {audio_file.name}")
             except subprocess.CalledProcessError as e:
                 print(f"Error during transcription for {audio_file.name}: {e}")
             except FileNotFoundError:
                 print("Error: 'whisper' command not found.")
-                print("Please ensure the Whisper CLI is installed and in your system's PATH.")
+                print(
+                    "Please ensure the Whisper CLI is installed and in your system's PATH."
+                )
                 sys.exit(1)
 
         print("\nAll requested tracks processed.")
 
-        # 5. Rename the generated VTT files
-        rename_vtt_files(output_dir)
+        # 6. Rename the generated VTT files
+        rename_vtt_files(transcript_dir, merged_dir)
 
-        # 6. Merge the generated VTT files
+        # 7. Merge the generated VTT files
         print("\nNow merging transcript files...")
-        merge_transcripts(output_dir)
+        merge_transcripts(merged_dir)
 
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
