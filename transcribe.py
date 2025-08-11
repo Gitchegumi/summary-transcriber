@@ -129,7 +129,6 @@ def rename_vtt_files(source_dir, dest_dir):
                 break  # Exit loop for this file on error
 
 
-
 # --- Main transcription logic ---
 
 
@@ -181,7 +180,7 @@ def main():
             print(f"\nStarting transcription for: {audio_file.name}")
 
             try:
-                process = subprocess.Popen(
+                subprocess.run(
                     [
                         "whisper",
                         str(audio_file),
@@ -189,25 +188,14 @@ def main():
                         selected_model,
                         "--device",
                         "cuda",
+                        "--output_format",
+                        "vtt",
                         "--output_dir",
                         str(transcript_dir),
                     ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
+                    check=True,
                 )
 
-                for line in iter(process.stdout.readline, ""):
-                    sys.stdout.buffer.write(line.encode(sys.stdout.encoding, errors='replace'))
-
-                process.wait()
-                if process.returncode != 0:
-                    raise subprocess.CalledProcessError(
-                        process.returncode, process.args
-                    )
                 print(f"Finished transcription for: {audio_file.name}")
             except subprocess.CalledProcessError as e:
                 print(f"Error during transcription for {audio_file.name}: {e}")
