@@ -201,7 +201,7 @@ def main():
                 )
 
                 for line in iter(process.stdout.readline, ""):
-                    print(line, end="")
+                    sys.stdout.buffer.write(line.encode(sys.stdout.encoding, errors='replace'))
 
                 process.wait()
                 if process.returncode != 0:
