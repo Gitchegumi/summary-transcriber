@@ -213,11 +213,84 @@ def main():
 
         # 7. Merge the generated VTT files
         print("\nNow merging transcript files...")
-        merge_transcripts(merged_dir)
+        merged_csv_path = merged_dir / "session_transcript.csv"
+        merge_transcripts(merged_dir, output_file=merged_csv_path.name)
+
+        # 8. Chunk the merged CSV
+        chunk_merged_csv(merged_csv_path)
 
     except KeyboardInterrupt:
         print("\nOperation cancelled by user.")
         sys.exit(0)
+
+
+def seconds_to_time(s):
+    """
+    Convert seconds (float) to hh:mm:ss.mmm format.
+    """
+    h = int(s // 3600)
+    s %= 3600
+    m = int(s // 60)
+    s %= 60
+    sec = int(s)
+    ms = int((s - sec) * 1000)
+    return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
+
+def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
+    """
+    Splits the merged CSV into smaller chunks of a specified duration.
+    """
+    merged_path = Path(merged_file)
+    chunk_dir = merged_path.parent / "chunked"
+    chunk_dir.mkdir(exist_ok=True)
+
+    chunk_duration_seconds = chunk_duration_minutes * 60
+    chunk_number = 1
+    current_chunk_start_time = 0
+    rows_in_chunk = []
+    
+    print(f"\nChunking transcript into {chunk_duration_minutes}-minute files...")
+
+    with open(merged_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)  # Skip header
+
+        for row in reader:
+            time_str, speaker, text = row
+            current_time = time_to_seconds(time_str)
+
+            if not rows_in_chunk:
+                # This is the first row of a new chunk
+                current_chunk_start_time = current_time
+                rows_in_chunk.append(row)
+            else:
+                # Check if adding this row exceeds the chunk duration
+                if current_time - current_chunk_start_time <= chunk_duration_seconds:
+                    rows_in_chunk.append(row)
+                else:
+                    # Write the current chunk to a file
+                    chunk_filename = chunk_dir / f"chunk_{chunk_number}.csv"
+                    with open(chunk_filename, "w", newline="", encoding="utf-8") as chunk_f:
+                        writer = csv.writer(chunk_f)
+                        writer.writerow(header)
+                        writer.writerows(rows_in_chunk)
+                    print(f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}")
+
+                    # Start a new chunk
+                    chunk_number += 1
+                    rows_in_chunk = [row]
+                    current_chunk_start_time = current_time
+
+    # Write the last remaining chunk
+    if rows_in_chunk:
+        chunk_filename = chunk_dir / f"chunk_{chunk_number}.csv"
+        with open(chunk_filename, "w", newline="", encoding="utf-8") as chunk_f:
+            writer = csv.writer(chunk_f)
+            writer.writerow(header)
+            writer.writerows(rows_in_chunk)
+        print(f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}")
+
+    print("Finished chunking.")
 
 
 if __name__ == "__main__":
