@@ -1,4 +1,7 @@
 #!/usr/bin/env python
+"""
+Audio transcription tool with speaker diarization and summarization capabilities.
+"""
 import re
 import sys
 import csv
@@ -116,7 +119,8 @@ def rename_vtt_files(source_dir, dest_dir):
 
                 if new_file_path.exists():
                     print(
-                        f"    Error: A file named '{new_file_path.name}' already exists in '{dest_dir}'. Please choose a different name."
+                        f"    Error: A file named '{new_file_path.name}' already "
+                        f"exists in '{dest_dir}'. Please choose a different name."
                     )
                     continue  # Ask again for a new name
 
@@ -155,7 +159,10 @@ def main():
 
         # 3. Get model size from user
         model_sizes = ["tiny", "base", "small", "medium", "large", "turbo"]
-        model_prompt = f"Please choose a model size ({', '.join(model_sizes)}). Press Enter for default (turbo): "
+        model_prompt = (
+            f"Please choose a model size ({', '.join(model_sizes)}). "
+            f"Press Enter for default (turbo): "
+        )
         selected_model = input(model_prompt).strip().lower()
         if not selected_model or selected_model not in model_sizes:
             selected_model = "turbo"
@@ -236,6 +243,7 @@ def seconds_to_time(s):
     ms = int((s - sec) * 1000)
     return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
 
+
 def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
     """
     Splits the merged CSV into smaller chunks of a specified duration.
@@ -248,7 +256,7 @@ def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
     chunk_number = 1
     current_chunk_start_time = 0
     rows_in_chunk = []
-    
+
     print(f"\nChunking transcript into {chunk_duration_minutes}-minute files...")
 
     with open(merged_path, "r", encoding="utf-8") as f:
@@ -256,7 +264,7 @@ def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
         header = next(reader)  # Skip header
 
         for row in reader:
-            time_str, speaker, text = row
+            time_str, _, _ = row  # speaker and text unused
             current_time = time_to_seconds(time_str)
 
             if not rows_in_chunk:
@@ -270,11 +278,15 @@ def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
                 else:
                     # Write the current chunk to a file
                     chunk_filename = chunk_dir / f"chunk_{chunk_number}.csv"
-                    with open(chunk_filename, "w", newline="", encoding="utf-8") as chunk_f:
+                    with open(
+                        chunk_filename, "w", newline="", encoding="utf-8"
+                    ) as chunk_f:
                         writer = csv.writer(chunk_f)
                         writer.writerow(header)
                         writer.writerows(rows_in_chunk)
-                    print(f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}")
+                    print(
+                        f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}"
+                    )
 
                     # Start a new chunk
                     chunk_number += 1
