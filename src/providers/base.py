@@ -16,6 +16,7 @@ class ProviderContext:
     model: str
     device: str = "cuda"
     language: str = "en"
+    verbose: bool = False
 
 
 class TranscriptionProvider(Protocol):
@@ -67,6 +68,7 @@ def transcribe_nemo_chunks(
     chunk_format: str = "wav",
     overlap_seconds: float = 2.0,
     progress_callback: Any = None,
+    verbose: bool = False,
 ) -> dict:
     """Sequentially transcribes audio chunks, with CUDA OOM retry logic and resume support."""
     import torch
@@ -121,6 +123,7 @@ def transcribe_nemo_chunks(
                 oom_events=oom_events,
                 retried_chunks=retried_chunks,
                 failed_chunks=failed_chunks,
+                verbose=verbose,
             )
 
             # Save raw outputs
@@ -214,6 +217,7 @@ def _transcribe_chunk_with_retry(
     oom_events: list,
     retried_chunks: list,
     failed_chunks: list,
+    verbose: bool = False,
 ) -> list[dict]:
     """Helper to transcribe chunk with OOM retry sequence (60s -> 30s -> 15s)."""
     import torch
@@ -249,8 +253,13 @@ def _transcribe_chunk_with_retry(
         raise RuntimeError(f"ffmpeg clipping failed: {exc.stderr}")
 
     try:
+        from src.runtime.output import SuppressBackendOutput, configure_backend_logging
+        configure_backend_logging(verbose=verbose)
+        
         # Load and run model transcription on the chunk
-        result = model.transcribe([str(clip_file)], timestamps=True)
+        with SuppressBackendOutput(enabled=not verbose) as suppressor:
+            result = model.transcribe([str(clip_file)], timestamps=True, verbose=verbose)
+            
         raw_res = result[0] if isinstance(result, list) else result
 
         # Clean up temporary clip file
@@ -279,6 +288,35 @@ def _transcribe_chunk_with_retry(
             except Exception:
                 pass
 
+        captured = ""
+        if 'suppressor' in locals() and suppressor.enabled:
+            captured = suppressor.get_captured_output()
+
+        log_file_path = None
+        if captured:
+            try:
+                logs_dir = temp_dir.parent.parent / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                log_file = logs_dir / f"nemo_error_{chunk_id}.log"
+                with log_file.open("w", encoding="utf-8") as f:
+                    f.write(f"Exception Type: {type(exc).__name__}\n")
+                    f.write(f"Exception Message: {str(exc)}\n")
+                    f.write(f"Retry Attempt: {step_idx}\n")
+                    f.write(f"Backend Output Suppressed: {not verbose}\n\n")
+                    f.write(captured)
+                log_file_path = str(log_file)
+            except Exception:
+                pass
+
+        diag_info = {
+            "chunk_id": chunk_id,
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "retry_attempt": step_idx,
+            "backend_output_suppressed": not verbose,
+            "debug_log_path": log_file_path,
+        }
+
         if is_oom:
             torch.cuda.empty_cache()
             oom_events.append(
@@ -288,6 +326,7 @@ def _transcribe_chunk_with_retry(
                     "end_seconds": end_time,
                     "step_seconds": current_step_sec,
                     "error": str(exc),
+                    **diag_info,
                 }
             )
 
@@ -326,6 +365,7 @@ def _transcribe_chunk_with_retry(
                         oom_events=oom_events,
                         retried_chunks=retried_chunks,
                         failed_chunks=failed_chunks,
+                        verbose=verbose,
                     )
                     sub_chunks_results.extend(res)
 
@@ -340,6 +380,7 @@ def _transcribe_chunk_with_retry(
                         "start_seconds": start_time,
                         "end_seconds": end_time,
                         "reason": "CUDA OOM at minimum chunk size (15s)",
+                        **diag_info,
                     }
                 )
                 if continue_on_error:
@@ -362,6 +403,7 @@ def _transcribe_chunk_with_retry(
                         "start_seconds": start_time,
                         "end_seconds": end_time,
                         "reason": f"Exception: {exc}",
+                        **diag_info,
                     }
                 )
                 return [

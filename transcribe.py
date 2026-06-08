@@ -30,6 +30,7 @@ from src.normalize.merge import merge_turns
 from src.normalize.turns import normalize_turns
 from src.normalize.words import normalize_words
 from src.providers.base import ProviderContext
+from src.runtime.output import configure_backend_logging
 from src.providers.canary import CanaryProvider
 from src.providers.parakeet import ParakeetProvider
 from src.providers.whisperx import WhisperXProvider
@@ -102,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         "--no-progress",
         action="store_true",
         help="Disable progress reporting readout.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose mode, showing full log outputs from ASR backends.",
     )
     return parser.parse_args()
 
@@ -176,11 +182,13 @@ def main() -> int:
     manifest.validate_audio_files()
 
     raw_dir = output_dir / "raw"
+    configure_backend_logging(verbose=args.verbose)
     provider_context = ProviderContext(
         backend=manifest.transcription.backend,
         model=manifest.transcription.model,
         device=manifest.transcription.device,
         language=manifest.transcription.language,
+        verbose=args.verbose,
     )
 
     from src.normalize.turns import DEDUPLICATION_DECISIONS

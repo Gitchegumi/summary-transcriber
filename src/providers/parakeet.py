@@ -42,6 +42,7 @@ class ParakeetProvider:
         overlap_seconds: float = 2.0,
     ) -> dict:
         model = self._load_model()
+        verbose = getattr(self.context, "verbose", False)
         if chunks is not None and output_dir is not None:
             return transcribe_nemo_chunks(
                 provider_name="parakeet",
@@ -56,10 +57,14 @@ class ParakeetProvider:
                 chunk_format=chunk_format,
                 overlap_seconds=overlap_seconds,
                 progress_callback=progress_callback,
+                verbose=verbose,
             )
 
         # Fallback to full file if no chunks specified
-        result = model.transcribe([str(audio_path)], timestamps=True)
+        from src.runtime.output import SuppressBackendOutput, configure_backend_logging
+        configure_backend_logging(verbose=verbose)
+        with SuppressBackendOutput(enabled=not verbose):
+            result = model.transcribe([str(audio_path)], timestamps=True, verbose=verbose)
         item = result[0] if isinstance(result, list) else result
         from src.providers.base import _json_safe
         return {
