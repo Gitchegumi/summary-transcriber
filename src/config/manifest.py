@@ -18,8 +18,8 @@ class SessionConfig:
 
 @dataclass
 class TranscriptionConfig:
-    backend: str = "parakeet"
-    model: str = "nvidia/parakeet-tdt-0.6b-v3"
+    backend: str = "faster-whisper"
+    model: str = "large-v3"
     device: str = "cuda"
     language: str = "en"
 

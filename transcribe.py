@@ -144,7 +144,7 @@ def main() -> int:
         prepared_path = source_path
         if args.normalize_audio:
             prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
-        elif needs_mono_downmix(audio_info):
+        elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_info):
             prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
         print(f"Audio input: {prepared_path}")
 
@@ -221,6 +221,10 @@ def resolve_output_dir(output_arg: str | None, manifest_path: Path) -> Path:
     if output_arg is None:
         return manifest_path.parent / "output"
     return Path(output_arg).resolve()
+
+
+def requires_mono_provider_input(backend: str) -> bool:
+    return backend in {"parakeet", "canary"}
 
 
 if __name__ == "__main__":

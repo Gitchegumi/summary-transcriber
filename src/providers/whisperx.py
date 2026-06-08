@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from src.config.manifest import SpeakerConfig
@@ -14,10 +15,18 @@ class WhisperXProvider:
     def _load_model(self):
         if self._model is not None:
             return self._model
-        try:
-            import whisperx
-        except ImportError:
-            whisperx = None
+        whisperx = None
+        if self.context.backend != "faster-whisper":
+            try:
+                import whisperx
+            except ImportError:
+                whisperx = None
+
+        if self.context.backend == "whisperx" and whisperx is None:
+            raise RuntimeError(
+                "WhisperX backend requires local whisperx. Install it with "
+                "`pip install whisperx`, or use backend: faster-whisper."
+            )
 
         if whisperx is not None:
             self._model = ("whisperx", whisperx.load_model(self.context.model, self.context.device))
@@ -27,11 +36,11 @@ class WhisperXProvider:
             from faster_whisper import WhisperModel
         except ImportError as exc:
             raise RuntimeError(
-                "WhisperX fallback requires local whisperx or faster-whisper. "
-                "Install the optional local dependencies documented in README.md."
+                "faster-whisper backend requires local faster-whisper. "
+                "Install it with `pip install faster-whisper` or `pip install -r requirements.txt`."
             ) from exc
 
-        compute_type = "float16" if self.context.device == "cuda" else "int8"
+        compute_type = _compute_type(self.context.device)
         self._model = (
             "faster-whisper",
             WhisperModel(self.context.model, device=self.context.device, compute_type=compute_type),
@@ -50,7 +59,11 @@ class WhisperXProvider:
                 "result": result,
             }
 
-        segments, info = model.transcribe(str(audio_path), language=self.context.language)
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=self.context.language,
+            word_timestamps=True,
+        )
         return {
             "provider": "faster-whisper",
             "model": self.context.model,
@@ -58,5 +71,31 @@ class WhisperXProvider:
             "audio_path": str(audio_path),
             "language": getattr(info, "language", None),
             "duration": getattr(info, "duration", None),
-            "result": {"segments": [segment._asdict() for segment in segments]},
+            "result": {"segments": [_json_safe(segment) for segment in segments]},
         }
+
+
+def _compute_type(device: str) -> str:
+    return "float16" if device == "cuda" else "int8"
+
+
+def _json_safe(value):
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if hasattr(value, "_asdict"):
+        return _json_safe(value._asdict())
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "__dict__"):
+        return {
+            key: _json_safe(item)
+            for key, item in value.__dict__.items()
+            if not key.startswith("_")
+        }
+    return str(value)

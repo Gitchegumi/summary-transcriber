@@ -8,9 +8,10 @@ Version 2 is a breaking rewrite of the old Whisper/VTT workflow. The canonical o
 
 - One manifest-driven CLI: `python transcribe.py --manifest session_manifest.yaml`
 - Local-only transcription providers
-- NVIDIA Parakeet TDT 0.6B v3 as the primary backend
+- faster-whisper as the recommended default backend
+- WhisperX as an optional Whisper-family backend
+- NVIDIA Parakeet TDT 0.6B v3 as an optional comparison backend
 - NVIDIA Canary 1B v2 as an optional local comparison backend
-- WhisperX or faster-whisper as an optional local fallback backend
 - Speaker identity from the manifest, not diarization, when Craig separate speaker tracks are available
 - Canonical turn, word, correction, entity, chunk, speaker, session, and quality-report exports
 
@@ -55,7 +56,7 @@ summary-transcriber/
 
 ## Install
 
-Create a virtual environment and install the lightweight orchestrator dependency:
+Create a virtual environment and install the default local transcription stack:
 
 ```bash
 python -m venv .venv
@@ -66,7 +67,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Keep this virtual environment active for every backend install command below. If you open a new terminal later, activate `.venv` again before running any `pip install ...` command.
+`requirements.txt` installs the orchestrator dependency plus faster-whisper, the default backend. Keep this virtual environment active for every backend install command below. If you open a new terminal later, activate `.venv` again before running any `pip install ...` command.
 
 Install FFmpeg and make sure `ffmpeg` and `ffprobe` are on your `PATH`.
 
@@ -81,13 +82,66 @@ brew install ffmpeg
 sudo apt update && sudo apt install ffmpeg
 ```
 
-## GPU and CUDA
+## Backend Installation
+
+The script does not install transcription backends automatically at runtime. Install the backend package first, then run `transcribe.py`. Model checkpoints are fetched and cached locally by the backend the first time that backend loads a model.
+
+### Default: faster-whisper
+
+faster-whisper is the recommended default for this tool because it is local, reliable on long Craig speaker tracks, and less fragile on Windows than the NVIDIA NeMo stack.
+
+```yaml
+transcription:
+  backend: faster-whisper
+  model: large-v3
+  device: cuda
+```
+
+Install it through the project requirements:
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install -r requirements.txt
+```
+
+Run:
+
+```bash
+python transcribe.py --manifest session_manifest.yaml
+```
+
+For CPU-only fallback, set `device: cpu` in the manifest. Long sessions will be slower on CPU.
+
+### Optional: WhisperX
+
+WhisperX is optional. Use it when you specifically want WhisperX behavior instead of plain faster-whisper.
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install whisperx
+```
+
+Run:
+
+```bash
+python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
+```
+
+Do not enable WhisperX diarization for Craig speaker-track runs; the manifest already supplies authoritative speaker identity. Diarization can require Hugging Face access and model agreements, which this project intentionally avoids.
+
+## Optional NVIDIA Backends
+
+Parakeet and Canary remain available as optional local comparison backends. They are not the default path. Use them when your CUDA/NeMo environment is stable and you want to benchmark transcript quality against faster-whisper.
+
+### GPU and CUDA
 
 Parakeet and Canary are large local ASR models. For practical long-session use, run on an NVIDIA GPU with a CUDA-enabled PyTorch installation. Install PyTorch for your CUDA version from the official PyTorch selector, then install the local ASR package you want to use.
 
 The CLI defaults to `device: cuda`. Use `device: cpu` only for short tests or when GPU acceleration is unavailable. NVIDIA's current NeMo model documentation is Linux-centered; on Windows, WSL2 with NVIDIA CUDA support is usually the least surprising route for the NVIDIA backends.
 
-### Install CUDA-enabled PyTorch
+#### Install CUDA-enabled PyTorch
 
 Use a Python version that has matching CUDA PyTorch wheels and is supported by the NVIDIA stack. Python 3.12 is the safest Windows choice for this project right now. Avoid Python 3.13 for the NVIDIA backend unless the PyTorch selector and NeMo install both explicitly support it for your chosen CUDA build.
 
@@ -147,13 +201,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 python -c "import torch; import torchvision; import torchaudio; print(torch.__version__); print(torchvision.__version__); print(torchaudio.__version__); print('cuda available:', torch.cuda.is_available())"
 ```
 
-## Backend Installation
+### Optional Comparison: Parakeet TDT 0.6B v3
 
-The script does not install transcription backends automatically. Install the backend package first, then run `transcribe.py`. Model checkpoints are fetched and cached locally by the backend the first time that backend loads a model.
-
-### Primary: Parakeet TDT 0.6B v3
-
-Parakeet is the intended primary model for this project. Use it for normal D&D session transcription unless you have a specific reason to compare or fall back.
+Parakeet is optional. Use it for comparison runs after the default faster-whisper workflow is working.
 
 ```yaml
 transcription:
@@ -176,10 +226,10 @@ Quick local check:
 python -c "import nemo.collections.asr as nemo_asr; nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v3'); print('parakeet ready')"
 ```
 
-Then run:
+Run Parakeet as an override:
 
 ```bash
-python transcribe.py --manifest session_manifest.yaml
+python transcribe.py --manifest session_manifest.yaml --backend parakeet --model nvidia/parakeet-tdt-0.6b-v3
 ```
 
 ### Optional Comparison: Canary 1B v2
@@ -213,50 +263,14 @@ Run Canary as an override:
 python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
 ```
 
-### Optional Fallback: WhisperX
-
-WhisperX is optional. Use it when the NVIDIA NeMo stack is not available or when you want a local Whisper-family fallback.
-
-```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
-pip install whisperx
-```
-
-Run:
-
-```bash
-python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
-```
-
-Do not enable WhisperX diarization for Craig speaker-track runs; the manifest already supplies authoritative speaker identity. Diarization can require Hugging Face access and model agreements, which this project intentionally avoids.
-
-### Optional Fallback: faster-whisper
-
-The `whisperx` provider also falls back to faster-whisper if `whisperx` is not installed but `faster-whisper` is available.
-
-```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
-pip install faster-whisper
-```
-
-Run:
-
-```bash
-python transcribe.py --manifest session_manifest.yaml --backend faster-whisper --model large-v3
-```
-
-For GPU acceleration, faster-whisper also needs compatible NVIDIA cuBLAS/cuDNN libraries available to CTranslate2. CPU runs can use `device: cpu`, but long sessions will be slower.
-
 ## Backend Priority
 
 Use the backends in this order:
 
-1. Parakeet TDT 0.6B v3: primary, intended default.
-2. Canary 1B v2: optional comparison or benchmark backend.
-3. WhisperX: optional local fallback.
-4. faster-whisper: optional local fallback when WhisperX is not installed.
+1. faster-whisper: recommended default.
+2. WhisperX: optional Whisper-family backend.
+3. Parakeet TDT 0.6B v3: optional NVIDIA comparison backend.
+4. Canary 1B v2: optional NVIDIA comparison or benchmark backend.
 
 ## Craig Speaker-Track Audio
 
@@ -272,7 +286,7 @@ session_manifest.yaml
 
 Use stable `speaker_id` values because they become foreign keys in the exported CSV/JSON records. Use `display_name` for the human-readable speaker name and `character_name` for the D&D character when applicable.
 
-The pipeline sends mono manifest audio files directly to the transcription provider by default. If a Craig `.flac` track is stereo or otherwise multi-channel, the pipeline creates a local mono FLAC in `output/prepared_audio/` and sends that to the provider, because NVIDIA NeMo expects ASR input shaped as one audio channel. Craig `.flac` files do not need to be remuxed to WAV first.
+The default faster-whisper backend sends manifest audio files directly to the transcription provider. Craig `.flac` files do not need to be remuxed to WAV first. If you run Parakeet or Canary and a Craig `.flac` track is stereo or otherwise multi-channel, the pipeline creates a local mono FLAC in `output/prepared_audio/` and sends that to NeMo because NeMo expects ASR input shaped as one audio channel.
 
 Use `--normalize-audio` only if a backend has trouble reading the source file or you explicitly want local mono 16 kHz WAV files instead of mono FLAC in `output/prepared_audio/`:
 
@@ -291,8 +305,8 @@ session:
   source: "craig"
 
 transcription:
-  backend: parakeet
-  model: nvidia/parakeet-tdt-0.6b-v3
+  backend: faster-whisper
+  model: large-v3
   device: cuda
 
 speakers:
@@ -347,6 +361,7 @@ Useful overrides:
 
 ```bash
 python transcribe.py --manifest session_manifest.yaml --output output
+python transcribe.py --manifest session_manifest.yaml --backend parakeet --model nvidia/parakeet-tdt-0.6b-v3
 python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
 python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
 python transcribe.py --manifest session_manifest.yaml --skip-transcription
@@ -362,7 +377,7 @@ If `--output` is omitted, outputs are written to an `output/` folder beside the 
 1. Load `session_manifest.yaml`.
 2. Validate all listed audio files exist.
 3. Inspect audio duration, sample rate, channel count, format, and codec with `ffprobe`.
-4. Send mono source audio directly to the provider, downmix multi-channel audio to mono FLAC when needed, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
+4. Send source audio directly to faster-whisper or WhisperX, downmix multi-channel audio to mono FLAC for NeMo backends when needed, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
 5. Transcribe each known speaker track independently.
 6. Preserve raw local model output for debugging.
 7. Normalize provider output into canonical word and turn records.
@@ -407,7 +422,7 @@ output/
     merged.vtt
 
   raw/
-    parakeet/
+    faster-whisper/
       speaker_id.raw.json
 ```
 
