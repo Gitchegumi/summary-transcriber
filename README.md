@@ -87,6 +87,42 @@ Parakeet and Canary are large local ASR models. For practical long-session use, 
 
 The CLI defaults to `device: cuda`. Use `device: cpu` only for short tests or when GPU acceleration is unavailable. NVIDIA's current NeMo model documentation is Linux-centered; on Windows, WSL2 with NVIDIA CUDA support is usually the least surprising route for the NVIDIA backends.
 
+### Install CUDA-enabled PyTorch
+
+Do this inside the same virtual environment you use for this project. If you already installed CPU-only PyTorch, uninstall it first:
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip uninstall -y torch torchvision torchaudio
+```
+
+Then use the official PyTorch selector:
+
+1. Open <https://pytorch.org/get-started/locally/>.
+2. Choose `Stable`.
+3. Choose your OS.
+4. Choose `Pip`.
+5. Choose `Python`.
+6. Choose a CUDA compute platform. The current selector lists CUDA 11.8, 12.6, and 12.8; choose the newest CUDA option supported by your NVIDIA driver.
+7. Run the generated `pip install ... --index-url https://download.pytorch.org/whl/cu...` command inside `.venv`.
+
+Example for CUDA 12.8:
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+Verify that PyTorch can see CUDA before installing NeMo:
+
+```bash
+python -c "import torch; print(torch.__version__); print('cuda available:', torch.cuda.is_available()); print('cuda version:', torch.version.cuda); print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+```
+
+If `cuda available` prints `False`, Parakeet will fail when the manifest uses `device: cuda`. Fix PyTorch/CUDA first, or temporarily set `device: cpu` in the manifest.
+
 ## Backend Installation
 
 The script does not install transcription backends automatically. Install the backend package first, then run `transcribe.py`. Model checkpoints are fetched and cached locally by the backend the first time that backend loads a model.
@@ -102,7 +138,7 @@ transcription:
   device: cuda
 ```
 
-With `.venv` active, install CUDA-enabled PyTorch first, then install NVIDIA NeMo ASR:
+After CUDA-enabled PyTorch is installed and verified, install NVIDIA NeMo ASR:
 
 ```bash
 .\.venv\Scripts\Activate.ps1  # Windows, if not already active
@@ -133,7 +169,7 @@ transcription:
   device: cuda
 ```
 
-With `.venv` active, install CUDA-enabled PyTorch first, then install NVIDIA NeMo ASR if you have not already installed it for Parakeet:
+If you did not already install NeMo for Parakeet, install it after CUDA-enabled PyTorch is installed and verified:
 
 ```bash
 .\.venv\Scripts\Activate.ps1  # Windows, if not already active
