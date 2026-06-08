@@ -4,18 +4,7 @@ import subprocess
 from pathlib import Path
 
 
-DIRECT_USE_EXTENSIONS = {".flac", ".wav"}
-
-
-def prepare_audio(
-    source: Path,
-    audio_info: dict,
-    prepared_dir: Path,
-    sample_rate: int = 16000,
-) -> Path:
-    if _can_use_directly(source, audio_info, sample_rate):
-        return source
-
+def prepare_audio(source: Path, prepared_dir: Path, sample_rate: int = 16000) -> Path:
     prepared_dir.mkdir(parents=True, exist_ok=True)
     target = prepared_dir / f"{source.stem}.mono{sample_rate}.wav"
     if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
@@ -40,11 +29,3 @@ def prepare_audio(
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"ffmpeg failed for {source}: {exc.stderr}") from exc
     return target
-
-
-def _can_use_directly(source: Path, audio_info: dict, sample_rate: int) -> bool:
-    return (
-        source.suffix.lower() in DIRECT_USE_EXTENSIONS
-        and int(audio_info.get("channels") or 0) == 1
-        and int(audio_info.get("sample_rate") or 0) == sample_rate
-    )

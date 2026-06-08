@@ -212,12 +212,12 @@ session_manifest.yaml
 
 Use stable `speaker_id` values because they become foreign keys in the exported CSV/JSON records. Use `display_name` for the human-readable speaker name and `character_name` for the D&D character when applicable.
 
-The pipeline can use compatible `.flac` and `.wav` files directly. If a source file is already mono 16 kHz FLAC/WAV, it is passed to the transcription provider without remuxing. If the file has a different sample rate, channel count, or container, the pipeline creates a local mono 16 kHz WAV in `output/prepared_audio/` and uses that prepared file for transcription.
+The pipeline sends manifest audio files directly to the transcription provider by default. Craig `.flac` files do not need to be remuxed to WAV first.
 
-Use `--no-audio-normalize` if you want to force the provider to consume the exact source files from the manifest:
+Use `--normalize-audio` only if a backend has trouble reading the source file or you explicitly want local mono 16 kHz WAV files in `output/prepared_audio/`:
 
 ```bash
-python transcribe.py --manifest session_manifest.yaml --no-audio-normalize
+python transcribe.py --manifest session_manifest.yaml --normalize-audio
 ```
 
 ## Session Manifest
@@ -290,7 +290,7 @@ python transcribe.py --manifest session_manifest.yaml --output output
 python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
 python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
 python transcribe.py --manifest session_manifest.yaml --skip-transcription
-python transcribe.py --manifest session_manifest.yaml --no-audio-normalize
+python transcribe.py --manifest session_manifest.yaml --normalize-audio
 ```
 
 `--skip-transcription` reuses raw provider JSON from `output/raw/<backend>/<speaker_id>.raw.json`, which is helpful while iterating on normalization and exports.
@@ -302,7 +302,7 @@ If `--output` is omitted, outputs are written to an `output/` folder beside the 
 1. Load `session_manifest.yaml`.
 2. Validate all listed audio files exist.
 3. Inspect audio duration, sample rate, channel count, format, and codec with `ffprobe`.
-4. Use compatible mono 16 kHz FLAC/WAV directly, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when needed.
+4. Send source audio directly to the provider, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
 5. Transcribe each known speaker track independently.
 6. Preserve raw local model output for debugging.
 7. Normalize provider output into canonical word and turn records.

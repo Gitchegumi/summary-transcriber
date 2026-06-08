@@ -75,9 +75,14 @@ def parse_args() -> argparse.Namespace:
         help="Time-based transcript chunk size.",
     )
     parser.add_argument(
+        "--normalize-audio",
+        action="store_true",
+        help="Prepare mono 16 kHz WAV files before transcription instead of sending source audio directly.",
+    )
+    parser.add_argument(
         "--no-audio-normalize",
         action="store_true",
-        help="Send manifest audio files directly to the provider instead of preparing mono 16 kHz WAV files.",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -136,11 +141,10 @@ def main() -> int:
         print(f"\nInspecting {speaker.speaker_id}: {source_path}")
         audio_info = inspect_audio(source_path)
         audio_reports[speaker.speaker_id] = audio_info
-        prepared_path = (
-            source_path
-            if args.no_audio_normalize
-            else prepare_audio(source_path, audio_info, output_dir / "prepared_audio")
-        )
+        prepared_path = source_path
+        if args.normalize_audio:
+            prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+        print(f"Audio input: {prepared_path}")
 
         if args.skip_transcription:
             raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
