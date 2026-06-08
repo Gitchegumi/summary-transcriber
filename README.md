@@ -219,7 +219,7 @@ output/
   transcript_quality_report.json
 
   agents/
-    hermes_turns.jsonl
+    turns.jsonl
     chunks/
       chunk_001.json
       chunk_002.json
@@ -302,7 +302,7 @@ Use `session_id`, `speaker_id`, `turn_id`, `word_id`, and `chunk_id` as stable i
 
 ## Agent Consumption
 
-Use `output/agents/hermes_turns.jsonl` as the canonical chronological input for Hermes or other recap agents. Each JSONL record includes session metadata, stable turn ID, speaker metadata, character metadata, timestamps, raw text, cleaned text, confidence metadata, correction candidates, and tags.
+Use `output/agents/turns.jsonl` as the canonical chronological input for recap agents. Each JSONL record includes session metadata, stable turn ID, speaker metadata, character metadata, timestamps, raw text, cleaned text, confidence metadata, correction candidates, and tags.
 
 Use `output/agents/chunks/chunk_###.json` for bounded summarization passes, then combine chunk notes into a final recap. `output/agents/session_summary_input.md` provides a compact index for agent orchestration.
 

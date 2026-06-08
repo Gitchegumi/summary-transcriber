@@ -18,7 +18,7 @@ def export_agents(
     for correction in corrections:
         corrections_by_turn.setdefault(correction["turn_id"], []).append(correction)
 
-    jsonl_path = output_dir / "hermes_turns.jsonl"
+    jsonl_path = output_dir / "turns.jsonl"
     with jsonl_path.open("w", encoding="utf-8", newline="\n") as f:
         for turn in turns:
             f.write(json.dumps(_turn_payload(manifest, turn, corrections_by_turn), ensure_ascii=False) + "\n")
@@ -83,8 +83,8 @@ def _speaker_role(manifest: SessionManifest, speaker_id: str) -> str | None:
 
 def _write_summary_input(path: Path, manifest: SessionManifest, chunks: list[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as f:
-        f.write("# Hermes Session Summary Input\n\n")
-        f.write("Use `hermes_turns.jsonl` as the canonical chronological transcript.\n")
+        f.write("# Agent Session Summary Input\n\n")
+        f.write("Use `turns.jsonl` as the canonical chronological transcript.\n")
         f.write("Use chunk JSON files for bounded summarization passes.\n\n")
         f.write("## Session\n\n")
         f.write(f"- Session ID: {manifest.session.id}\n")

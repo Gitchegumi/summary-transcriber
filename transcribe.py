@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         default="output",
-        help="Output directory for canonical CSV/JSON, Hermes, Markdown, VTT, and raw files.",
+        help="Output directory for canonical CSV/JSON, agent, Markdown, VTT, and raw files.",
     )
     parser.add_argument(
         "--backend",
