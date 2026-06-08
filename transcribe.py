@@ -6,6 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+
+# Check for verbose flag early to configure quiet backend logging before anything else
+_early_verbose = "--verbose" in sys.argv
+from src.runtime.output import configure_quiet_backend_logging
+configure_quiet_backend_logging(verbose=_early_verbose)
+
 import time
 from datetime import datetime, timezone
 from pathlib import Path

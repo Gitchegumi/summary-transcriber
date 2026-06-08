@@ -23,6 +23,8 @@ def configure_quiet_backend_logging(verbose: bool = False) -> None:
         logger = py_logging.getLogger(name)
         logger.setLevel(level)
         logger.propagate = verbose
+        if not verbose:
+            logger.handlers.clear()
         
     # Suppress warnings specifically from these modules
     if not verbose:
@@ -35,6 +37,7 @@ def configure_quiet_backend_logging(verbose: bool = False) -> None:
 
 def configure_nemo_logging(verbose: bool = False) -> None:
     """Configures NeMo's own logging level after NeMo is imported."""
+    level = py_logging.DEBUG if verbose else py_logging.ERROR
     level_name = "DEBUG" if verbose else "ERROR"
     try:
         from nemo.utils import logging as nemo_logging
@@ -42,6 +45,13 @@ def configure_nemo_logging(verbose: bool = False) -> None:
         nemo_logging.setLevel(level_val)
     except ImportError:
         pass
+
+    nemo_logger = py_logging.getLogger("nemo_logger")
+    nemo_logger.setLevel(level)
+    for h in nemo_logger.handlers:
+        h.setLevel(level)
+    if not verbose:
+        nemo_logger.handlers.clear()
 
 
 class suppress_backend_output:
