@@ -20,29 +20,35 @@ No API keys are required. Audio is never uploaded. Hosted transcription services
 
 ```text
 summary-transcriber/
-  transcribe.py
-  src/
-    config/manifest.py
-    audio/inspect.py
-    audio/prepare.py
-    audio/clip.py
-    providers/base.py
-    providers/parakeet.py
-    providers/canary.py
-    providers/whisperx.py
-    normalize/turns.py
-    normalize/words.py
-    normalize/merge.py
-    enrich/glossary.py
-    enrich/corrections.py
-    enrich/entities.py
-    enrich/quality.py
-    enrich/chunks.py
-    exports/nocodb.py
-    exports/agents.py
-    exports/markdown.py
-    exports/vtt.py
-    exports/raw.py
+├── transcribe.py
+└── src/
+    ├── config/
+    │   └── manifest.py
+    ├── audio/
+    │   ├── inspect.py
+    │   ├── prepare.py
+    │   └── clip.py
+    ├── providers/
+    │   ├── base.py
+    │   ├── parakeet.py
+    │   ├── canary.py
+    │   └── whisperx.py
+    ├── normalize/
+    │   ├── turns.py
+    │   ├── words.py
+    │   └── merge.py
+    ├── enrich/
+    │   ├── glossary.py
+    │   ├── corrections.py
+    │   ├── entities.py
+    │   ├── quality.py
+    │   └── chunks.py
+    └── exports/
+        ├── nocodb.py
+        ├── agents.py
+        ├── markdown.py
+        ├── vtt.py
+        └── raw.py
 ```
 
 ## Install
