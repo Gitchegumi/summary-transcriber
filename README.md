@@ -107,12 +107,14 @@ Then use the official PyTorch selector:
 6. Choose a CUDA compute platform. The current selector lists CUDA 11.8, 12.6, and 12.8; choose the newest CUDA option supported by your NVIDIA driver.
 7. Run the generated `pip install ... --index-url https://download.pytorch.org/whl/cu...` command inside `.venv`.
 
-Example for CUDA 12.8:
+Example for CUDA 12.6:
+
+> NOTE: You can check the CUDA version supported by your NVIDIA driver with `nvidia-smi` in a terminal. If your driver only supports an older CUDA version, install the corresponding PyTorch build instead of the newest one. Use the [PyTorch Stable selector](https://pytorch.org/get-started/locally/) to generate the correct command.
 
 ```bash
 .\.venv\Scripts\Activate.ps1  # Windows, if not already active
 # source .venv/bin/activate   # macOS/Linux, if not already active
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
 Verify that PyTorch can see CUDA before installing NeMo:
