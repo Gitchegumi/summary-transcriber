@@ -281,7 +281,7 @@ Use the backends in this order:
 
 ## Long-form Audio Chunking
 
-NeMo models (Parakeet and Canary) are not designed to process massive 3+ hour audio tracks in a single transcription call, which can lead to catastrophic memory usage or timeouts. 
+NeMo models (Parakeet and Canary) are not designed to process massive 3+ hour audio tracks in a single transcription call, which can lead to catastrophic memory usage or timeouts.
 
 ### Conditional Chunking Rule
 
@@ -311,6 +311,7 @@ Transcription progress is reported using actual processed duration units, rather
 ### Progress Readout (NeMo backends)
 
 Displays in the terminal:
+
 - Current speaker track.
 - Completed chunks / Total chunks for speaker.
 - Processed speaker audio duration / Total speaker audio duration.
@@ -469,6 +470,7 @@ python transcribe.py --manifest session_018/manifest.yaml --mode draft
 ```
 
 Runs the audio preparation, chunking, ASR transcription (or loads raw cached model results if `--skip-transcription` is passed), applies existing glossary rules, and exports:
+
 - `output/draft/transcript_turns.draft.csv`
 - `output/draft/transcript_words.draft.csv`
 - `output/draft/candidate_glossary.yaml`
@@ -483,6 +485,7 @@ python transcribe.py --manifest session_018/manifest.yaml --mode finalize
 ```
 
 Loads the raw transcript data directly from the draft CSV files and applies the reviewed glossary. **This does not run model transcription or require a GPU**, completing in seconds. It updates and regenerates:
+
 - NocoDB CSVs and Session JSON
 - VTT and Markdown files
 - Quality reports and agent files
@@ -568,6 +571,7 @@ output/
 ### NocoDB Import
 
 Import the CSV files in `output/` directly into NocoDB as tables. Set up relationships using:
+
 - `session_id` as session foreign key.
 - `speaker_id` as speaker foreign key.
 - `turn_id` as turn foreign key.
@@ -576,6 +580,7 @@ Import the CSV files in `output/` directly into NocoDB as tables. Set up relatio
 ### Agent Consumption
 
 Recap agents (e.g. Hermes, OpenClaw) should consume:
+
 - `output/agent/agent_turns.jsonl` (contains stable turn IDs, speaker/character metadata, raw and glossary-corrected texts, confidence scores, and low-confidence terms).
 - `output/agent/chunks/chunk_###.json` for chunk-by-chunk summarization.
 - `output/agent/session_summary_input.md` as an index page.
