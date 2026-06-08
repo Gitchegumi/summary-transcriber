@@ -19,7 +19,7 @@ from src.enrich.corrections import apply_corrections
 from src.enrich.entities import extract_entities
 from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
-from src.progress.reporter import ProgressReporter, format_duration
+from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
 from src.exports.agents import export_agents
 from src.exports.glossary import export_glossary_candidates, export_draft_outputs
 from src.exports.markdown import export_markdown
@@ -211,6 +211,29 @@ def main() -> int:
         entities = extract_entities(cleaned_turns, manifest.glossary)
         chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
         
+        # Try to load existing quality report to preserve chunk preparation metrics
+        existing_report_path = output_dir / "transcript_quality_report.json"
+        existing_metrics = {}
+        if existing_report_path.exists():
+            try:
+                with existing_report_path.open("r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                    for k in [
+                        "chunk_preparation_wall_clock_time",
+                        "total_source_audio_duration",
+                        "total_chunks_expected",
+                        "chunks_generated",
+                        "chunks_reused",
+                        "chunks_skipped",
+                        "chunks_regenerated",
+                        "chunks_deleted",
+                        "chunking_skipped_whisper",
+                    ]:
+                        if k in existing_data:
+                            existing_metrics[k] = existing_data[k]
+            except Exception:
+                pass
+
         quality_report = build_quality_report(
             manifest=manifest,
             turns=cleaned_turns,
@@ -221,6 +244,7 @@ def main() -> int:
             nemo_chunking_used=(manifest.transcription.backend in {"parakeet", "canary"}),
             chunk_duration=manifest.audio.chunk_seconds,
             wall_clock_time=0.0,
+            **existing_metrics,
         )
         
         print("Exporting canonical and export formats...")
@@ -246,33 +270,102 @@ def main() -> int:
     # --- DRAFT MODE ---
     provider = get_provider(provider_context)
 
+    is_nemo = provider_context.backend in {"parakeet", "canary"}
+    
+    # Initialize prep metrics
+    chunk_prep_time = 0.0
+    chunks_generated = 0
+    chunks_reused = 0
+    chunks_skipped = 0
+    chunks_regenerated = 0
+    chunks_deleted = 0
+
+    progress_enabled = manifest.progress.enabled and not args.no_progress
+    update_interval = manifest.progress.update_interval_seconds
+
+    # Initialize prep progress reporter if NeMo is selected
+    prep_reporter = ChunkPrepProgressReporter(
+        session_id=manifest.session.id,
+        backend=provider_context.backend,
+        enabled=progress_enabled,
+        update_interval_seconds=update_interval,
+        total_speakers=len(manifest.speakers),
+    )
+    prep_reporter.set_speaker_ids([s.speaker_id for s in manifest.speakers])
+
     audio_reports = {}
-    for speaker in manifest.speakers:
+    for idx, speaker in enumerate(manifest.speakers):
         source_path = manifest.resolve_path(speaker.file)
+        if is_nemo:
+            prep_reporter.start_speaker(
+                speaker_id=speaker.speaker_id,
+                display_name=speaker.display_name or speaker.character_name or "",
+                source_file=speaker.file,
+                speaker_index=idx,
+                phase="inspecting",
+            )
         audio_reports[speaker.speaker_id] = inspect_audio(source_path)
 
-    is_nemo = provider_context.backend in {"parakeet", "canary"}
+    total_audio_seconds = sum(info["duration_seconds"] for info in audio_reports.values())
+    prep_reporter.set_total_audio_seconds(total_audio_seconds)
+    for speaker in manifest.speakers:
+        prep_reporter.set_speaker_duration(
+            speaker.speaker_id, audio_reports[speaker.speaker_id]["duration_seconds"]
+        )
+
     all_chunks = {}
     total_chunks = 0
-    total_audio_seconds = 0.0
+    prepared_paths = {}
 
     if is_nemo:
-        print("Preparing audio chunks for NeMo backend...")
-        for speaker in manifest.speakers:
+        chunk_prep_start = time.time()
+        for idx, speaker in enumerate(manifest.speakers):
+            source_path = manifest.resolve_path(speaker.file)
+            prepared_path = source_path
+            
+            # Normalization / downmixing step
+            if args.normalize_audio:
+                prep_reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name or speaker.character_name or "",
+                    source_file=speaker.file,
+                    speaker_index=idx,
+                    phase="normalizing",
+                )
+                prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+            elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
+                prep_reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name or speaker.character_name or "",
+                    source_file=speaker.file,
+                    speaker_index=idx,
+                    phase="normalizing",
+                )
+                prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
+                
+            prepared_paths[speaker.speaker_id] = prepared_path
+            
+            # Chunking step
             chunks_meta = chunk_speaker_audio(
                 manifest=manifest,
                 speaker=speaker,
                 output_dir=output_dir,
                 force_chunks=args.force_chunks,
+                progress_reporter=prep_reporter,
             )
             all_chunks[speaker.speaker_id] = chunks_meta
             total_chunks += len(chunks_meta)
-            total_audio_seconds += audio_reports[speaker.speaker_id]["duration_seconds"]
-        print(f"Total chunks to process: {total_chunks} across all speakers.")
 
-    progress_enabled = manifest.progress.enabled and not args.no_progress
-    update_interval = manifest.progress.update_interval_seconds
-    
+        prep_reporter.set_phase("completed")
+        prep_reporter.finish()
+        
+        chunk_prep_time = time.time() - chunk_prep_start
+        chunks_generated = prep_reporter.chunks_generated
+        chunks_reused = prep_reporter.chunks_reused
+        chunks_skipped = prep_reporter.chunks_skipped
+        chunks_regenerated = prep_reporter.chunks_regenerated
+        chunks_deleted = prep_reporter.chunks_deleted
+
     reporter = ProgressReporter(
         session_id=manifest.session.id,
         backend=provider_context.backend,
@@ -295,12 +388,14 @@ def main() -> int:
 
     for speaker in manifest.speakers:
         source_path = manifest.resolve_path(speaker.file)
-        prepared_path = source_path
-        
-        if args.normalize_audio:
-            prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
-        elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
-            prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
+        if is_nemo:
+            prepared_path = prepared_paths[speaker.speaker_id]
+        else:
+            prepared_path = source_path
+            if args.normalize_audio:
+                prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+            elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
+                prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
 
         if args.skip_transcription:
             raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
@@ -401,6 +496,14 @@ def main() -> int:
         nemo_chunking_used=is_nemo,
         chunk_duration=manifest.audio.chunk_seconds,
         wall_clock_time=wall_clock_time,
+        chunk_preparation_wall_clock_time=chunk_prep_time,
+        total_chunks_expected=total_chunks,
+        chunks_generated=chunks_generated,
+        chunks_reused=chunks_reused,
+        chunks_skipped=chunks_skipped,
+        chunks_regenerated=chunks_regenerated,
+        chunks_deleted=chunks_deleted,
+        chunking_skipped_whisper=not is_nemo,
     )
 
     export_nocodb(

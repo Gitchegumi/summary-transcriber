@@ -41,6 +41,7 @@ def chunk_speaker_audio(
     speaker: SpeakerConfig,
     output_dir: Path,
     force_chunks: bool = False,
+    progress_reporter: Any = None,
 ) -> list[dict[str, Any]]:
     """Chunks a speaker track and returns a list of chunk metadata dicts."""
     chunks_dir = output_dir / "chunks"
@@ -71,6 +72,25 @@ def chunk_speaker_audio(
         if speaker_chunks and all((chunks_dir.parent / c["chunk_file"]).exists() for c in speaker_chunks):
             # Sort by index
             speaker_chunks.sort(key=lambda x: x["chunk_index"])
+            
+            # Clean up orphaned chunks
+            active_filenames = {Path(c["chunk_file"]).name for c in speaker_chunks}
+            deleted_count = 0
+            if speaker_chunks_dir.exists():
+                for f in speaker_chunks_dir.iterdir():
+                    if f.is_file() and f.name not in active_filenames:
+                        try:
+                            f.unlink()
+                            deleted_count += 1
+                        except Exception:
+                            pass
+            
+            if deleted_count > 0 and progress_reporter:
+                progress_reporter.report_cleanup(deleted_count)
+
+            if progress_reporter:
+                progress_reporter.report_reuse(speaker.speaker_id, len(speaker_chunks))
+                
             return speaker_chunks
 
     # Otherwise, we need to chunk!
@@ -100,6 +120,15 @@ def chunk_speaker_audio(
         intervals.append((start, end))
         start += chunk_seconds - overlap_seconds
         chunk_idx += 1
+
+    # Report starting of chunking
+    phase = "regenerating chunks" if force_chunks else "generating chunks"
+    if progress_reporter:
+        progress_reporter.start_chunking(
+            speaker_id=speaker.speaker_id,
+            phase=phase,
+            num_chunks=len(intervals)
+        )
 
     # Write chunks using ffmpeg
     new_chunks = []
@@ -134,6 +163,13 @@ def chunk_speaker_audio(
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"ffmpeg chunking failed for {source_path}: {exc.stderr}")
 
+        if progress_reporter:
+            progress_reporter.complete_chunk_prep(
+                speaker_id=speaker.speaker_id,
+                chunk_duration=c_duration,
+                is_regenerated=force_chunks
+            )
+
         # Path of the chunk relative to the output_dir
         rel_chunk_file = os.path.relpath(chunk_file_path, output_dir)
 
@@ -148,6 +184,20 @@ def chunk_speaker_audio(
             "chunk_end_seconds": c_end,
             "overlap_seconds": overlap_seconds if idx > 0 else 0.0,
         })
+
+    # Clean up orphaned chunks
+    active_filenames = {Path(c["chunk_file"]).name for c in new_chunks}
+    deleted_count = 0
+    if speaker_chunks_dir.exists():
+        for f in speaker_chunks_dir.iterdir():
+            if f.is_file() and f.name not in active_filenames:
+                try:
+                    f.unlink()
+                    deleted_count += 1
+                except Exception:
+                    pass
+    if deleted_count > 0 and progress_reporter:
+        progress_reporter.report_cleanup(deleted_count)
 
     # Update manifest
     manifest_data["source_files"][speaker.file] = meta
