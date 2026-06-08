@@ -87,6 +87,18 @@ class GlossaryConfig:
 
 
 @dataclass
+class GlossaryCandidateFiltersConfig:
+    min_score: int = 3
+    min_occurrences: int = 2
+    filter_sentence_starters: bool = True
+    filter_common_words: bool = True
+    filter_profanity: bool = True
+    include_real_people: bool = False
+    include_noise_report: bool = True
+    custom_noise_terms: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SessionManifest:
     path: Path
     session: SessionConfig
@@ -97,6 +109,7 @@ class SessionManifest:
     glossary_sources: list[str] = field(default_factory=list)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
+    glossary_candidate_filters: GlossaryCandidateFiltersConfig = field(default_factory=GlossaryCandidateFiltersConfig)
 
     @property
     def root(self) -> Path:
@@ -225,6 +238,14 @@ def load_manifest(path: Path) -> SessionManifest:
 
     glossary_config = GlossaryConfig(entries=entries)
 
+    filters_data = data.get("glossary_candidate_filters") or {}
+    import dataclasses
+    field_names = {f.name for f in dataclasses.fields(GlossaryCandidateFiltersConfig)}
+    safe_filters = {k: v for k, v in filters_data.items() if k in field_names}
+    if "custom_noise_terms" in safe_filters and not isinstance(safe_filters["custom_noise_terms"], list):
+        safe_filters["custom_noise_terms"] = []
+    glossary_candidate_filters = GlossaryCandidateFiltersConfig(**safe_filters)
+
     return SessionManifest(
         path=path,
         session=session_config,
@@ -235,4 +256,5 @@ def load_manifest(path: Path) -> SessionManifest:
         glossary_sources=glossary_sources,
         workflow=workflow_config,
         glossary=glossary_config,
+        glossary_candidate_filters=glossary_candidate_filters,
     )

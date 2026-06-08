@@ -27,7 +27,7 @@ from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
 from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
 from src.exports.agents import export_agents
-from src.exports.glossary import export_glossary_candidates, export_draft_outputs
+from src.exports.glossary import export_glossary_candidates, export_draft_outputs, export_noise_report
 from src.exports.markdown import export_markdown
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
@@ -486,7 +486,7 @@ def main() -> int:
     cleaned_turns, corrections = apply_corrections(merged_turns, manifest.glossary)
     entities = extract_entities(cleaned_turns, manifest.glossary)
     
-    glossary_candidates = build_glossary_candidates(
+    glossary_candidates, noise_candidates = build_glossary_candidates(
         manifest=manifest,
         turns=cleaned_turns,
         words=all_words,
@@ -533,6 +533,7 @@ def main() -> int:
     )
     export_glossary_candidates(output_dir, glossary_candidates)
     export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
+    export_noise_report(output_dir, noise_candidates, manifest.glossary_candidate_filters.include_noise_report)
     export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
     export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
     export_vtt(output_dir / "vtt", cleaned_turns)
@@ -558,7 +559,8 @@ def main() -> int:
     print("Done.")
     print(
         f"Wrote {len(cleaned_turns)} turns, {len(all_words)} words, "
-        f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates."
+        f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates "
+        f"(and {len(noise_candidates)} noise candidates filtered)."
     )
     return 0
 
