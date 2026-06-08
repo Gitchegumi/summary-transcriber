@@ -562,6 +562,8 @@ output/
 
   vtt/
     merged.vtt
+
+  combat_extract.csv
 ```
 
 ---
@@ -584,6 +586,7 @@ Recap agents (e.g. Hermes, OpenClaw) should consume:
 - `output/agent/agent_turns.jsonl` (contains stable turn IDs, speaker/character metadata, raw and glossary-corrected texts, confidence scores, and low-confidence terms).
 - `output/agent/chunks/chunk_###.json` for chunk-by-chunk summarization.
 - `output/agent/session_summary_input.md` as an index page.
+- `output/combat_extract.csv` for pre-filtered combat-critical turns (initiative, attacks, spells, saves, conditions, etc.). This eliminates manual keyword searching across the full transcript during narrative review.
 
 ---
 
