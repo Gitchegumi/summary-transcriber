@@ -17,11 +17,39 @@ class SessionConfig:
 
 
 @dataclass
+class AudioConfig:
+    sample_rate: int = 16000
+    channels: int = 1
+    chunk_seconds: float = 60.0
+    overlap_seconds: float = 2.0
+    min_chunk_seconds: float = 15.0
+    chunk_format: str = "wav"
+
+
+@dataclass
 class TranscriptionConfig:
     backend: str = "faster-whisper"
     model: str = "large-v3"
     device: str = "cuda"
     language: str = "en"
+    batch_size: int = 1
+    precision: str = "float16"
+    continue_on_error: bool = True
+    retry_on_oom: bool = True
+    oom_retry_chunk_seconds: list[float] = field(default_factory=lambda: [30.0, 15.0])
+
+
+@dataclass
+class ProgressConfig:
+    enabled: bool = True
+    show_eta: bool = True
+    update_interval_seconds: float = 5.0
+
+
+@dataclass
+class WorkflowConfig:
+    mode: str = "draft"
+    generate_candidate_glossary: bool = True
 
 
 @dataclass
@@ -34,20 +62,27 @@ class SpeakerConfig:
 
 
 @dataclass
+class GlossaryEntry:
+    canonical: str
+    type: str | None = None
+    aliases: list[str] = field(default_factory=list)
+    description: str | None = None
+    related_to: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class GlossaryConfig:
-    pcs: list[str] = field(default_factory=list)
-    npcs: list[str] = field(default_factory=list)
-    locations: list[str] = field(default_factory=list)
-    factions: list[str] = field(default_factory=list)
-    items: list[str] = field(default_factory=list)
-    spells: list[str] = field(default_factory=list)
-    rules_terms: list[str] = field(default_factory=list)
-    custom_terms: list[str] = field(default_factory=list)
+    entries: dict[str, list[GlossaryEntry]] = field(default_factory=dict)
 
     def all_terms(self) -> list[str]:
-        terms: list[str] = []
-        for values in self.__dict__.values():
-            terms.extend(values or [])
+        terms: set[str] = set()
+        for entries_list in self.entries.values():
+            for entry in entries_list:
+                if entry.canonical:
+                    terms.add(entry.canonical)
+                for alias in entry.aliases:
+                    if alias:
+                        terms.add(alias)
         return sorted({term for term in terms if term})
 
 
@@ -55,9 +90,13 @@ class GlossaryConfig:
 class SessionManifest:
     path: Path
     session: SessionConfig
+    audio: AudioConfig
     transcription: TranscriptionConfig
+    progress: ProgressConfig
     speakers: list[SpeakerConfig]
-    glossary: GlossaryConfig
+    glossary_sources: list[str] = field(default_factory=list)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
 
     @property
     def root(self) -> Path:
@@ -106,7 +145,10 @@ def load_manifest(path: Path) -> SessionManifest:
         data = yaml.safe_load(f) or {}
 
     session_data = _require_mapping(data.get("session"), "session")
-    transcription_data = _require_mapping(data.get("transcription", {}), "transcription")
+    audio_data = data.get("audio") or {}
+    transcription_data = data.get("transcription") or {}
+    progress_data = data.get("progress") or {}
+    workflow_data = data.get("workflow") or {}
     speakers_data = data.get("speakers")
     if not isinstance(speakers_data, list) or not speakers_data:
         raise ValueError("Manifest field 'speakers' must be a non-empty list.")
@@ -116,10 +158,81 @@ def load_manifest(path: Path) -> SessionManifest:
     if len(speaker_ids) != len(set(speaker_ids)):
         raise ValueError("Manifest speaker_id values must be unique.")
 
+    session_config = SessionConfig(**session_data)
+    audio_config = AudioConfig(**audio_data)
+    transcription_config = TranscriptionConfig(**transcription_data)
+    progress_config = ProgressConfig(**progress_data)
+    workflow_config = WorkflowConfig(**workflow_data)
+
+    glossary_sources = data.get("glossary_sources") or []
+
+    # Resolve paths for glossary sources
+    resolved_sources = []
+    manifest_root = path.parent
+    for src in glossary_sources:
+        src_path = Path(src)
+        if not src_path.is_absolute():
+            src_path = manifest_root / src_path
+        resolved_sources.append(src_path.resolve())
+
+    # Build consolidated glossary entries
+    entries: dict[str, list[GlossaryEntry]] = {}
+
+    def add_items(category: str, items: list) -> None:
+        if not isinstance(items, list):
+            return
+        if category not in entries:
+            entries[category] = []
+        for item in items:
+            if isinstance(item, str):
+                entries[category].append(
+                    GlossaryEntry(canonical=item, type=category)
+                )
+            elif isinstance(item, dict):
+                canonical = item.get("canonical")
+                if not canonical:
+                    continue
+                entries[category].append(
+                    GlossaryEntry(
+                        canonical=canonical,
+                        type=item.get("type", category),
+                        aliases=item.get("aliases") or [],
+                        description=item.get("description"),
+                        related_to=item.get("related_to") or [],
+                    )
+                )
+
+    # Process manifest's own glossary if it exists
+    if "glossary" in data:
+        own_glossary = data["glossary"] or {}
+        if isinstance(own_glossary, dict):
+            for cat, items in own_glossary.items():
+                add_items(cat, items)
+
+    # Process glossary source files
+    for src_path in resolved_sources:
+        if src_path.exists():
+            try:
+                with src_path.open("r", encoding="utf-8") as f:
+                    file_data = yaml.safe_load(f) or {}
+                    glossary_data = file_data.get("glossary", file_data) or {}
+                    if isinstance(glossary_data, dict):
+                        for cat, items in glossary_data.items():
+                            add_items(cat, items)
+            except Exception:
+                # If a glossary file is empty or invalid, skip it
+                pass
+
+    glossary_config = GlossaryConfig(entries=entries)
+
     return SessionManifest(
         path=path,
-        session=SessionConfig(**session_data),
-        transcription=TranscriptionConfig(**transcription_data),
+        session=session_config,
+        audio=audio_config,
+        transcription=transcription_config,
+        progress=progress_config,
         speakers=speakers,
-        glossary=GlossaryConfig(**(data.get("glossary") or {})),
+        glossary_sources=glossary_sources,
+        workflow=workflow_config,
+        glossary=glossary_config,
     )

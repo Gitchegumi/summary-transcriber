@@ -10,10 +10,11 @@ Version 2 is a breaking rewrite of the old Whisper/VTT workflow. The canonical o
 - Local-only transcription providers
 - faster-whisper as the recommended default backend
 - WhisperX as an optional Whisper-family backend
-- NVIDIA Parakeet TDT 0.6B v3 as an optional comparison backend
+- NVIDIA Parakeet TDT 0.6B v3 as the preferred NVIDIA backend
 - NVIDIA Canary 1B v2 as an optional local comparison backend
 - Speaker identity from the manifest, not diarization, when Craig separate speaker tracks are available
 - Canonical turn, word, correction, entity, chunk, speaker, session, and quality-report exports
+- A draft/finalize progressive glossary workflow
 
 No API keys are required. Audio is never uploaded. Hosted transcription services are intentionally not part of this project.
 
@@ -24,16 +25,20 @@ summary-transcriber/
 ├── transcribe.py
 └── src/
     ├── config/
-    │   └── manifest.py
+    │   ├── manifest.py
+    │   └── glossary.py
     ├── audio/
     │   ├── inspect.py
     │   ├── prepare.py
-    │   └── clip.py
+    │   ├── clip.py
+    │   └── chunk.py
     ├── providers/
     │   ├── base.py
     │   ├── parakeet.py
     │   ├── canary.py
     │   └── whisperx.py
+    ├── progress/
+    │   └── reporter.py
     ├── normalize/
     │   ├── turns.py
     │   ├── words.py
@@ -135,7 +140,7 @@ Do not enable WhisperX diarization for Craig speaker-track runs; the manifest al
 
 Parakeet and Canary remain available as optional local comparison backends. They are not the default path. Use them when your CUDA/NeMo environment is stable and you want to benchmark transcript quality against faster-whisper.
 
-### GPU and CUDA
+### GPU and CUDA Setup
 
 Parakeet and Canary are large local ASR models. For practical long-session use, run on an NVIDIA GPU with a CUDA-enabled PyTorch installation. Install PyTorch for your CUDA version from the official PyTorch selector, then install the local ASR package you want to use.
 
@@ -201,9 +206,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 python -c "import torch; import torchvision; import torchaudio; print(torch.__version__); print(torchvision.__version__); print(torchaudio.__version__); print('cuda available:', torch.cuda.is_available())"
 ```
 
-### Optional Comparison: Parakeet TDT 0.6B v3
+### Preferred: Parakeet TDT 0.6B v3
 
-Parakeet is optional. Use it for comparison runs after the default faster-whisper workflow is working.
+Parakeet is the preferred NVIDIA model. Use it for comparison runs after the default faster-whisper workflow is working.
 
 ```yaml
 transcription:
@@ -215,8 +220,8 @@ transcription:
 After CUDA-enabled PyTorch is installed and verified, install NVIDIA NeMo ASR:
 
 ```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
+.\.nvidia-venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .nvidia-venv/bin/activate   # macOS/Linux, if not already active
 pip install -U "nemo_toolkit[asr]"
 ```
 
@@ -246,8 +251,8 @@ transcription:
 If you did not already install NeMo for Parakeet, install it after CUDA-enabled PyTorch is installed and verified:
 
 ```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
+.\.nvidia-venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .nvidia-venv/bin/activate   # macOS/Linux, if not already active
 pip install -U "nemo_toolkit[asr]"
 ```
 
@@ -267,10 +272,66 @@ python transcribe.py --manifest session_manifest.yaml --backend canary --model n
 
 Use the backends in this order:
 
-1. faster-whisper: recommended default.
-2. WhisperX: optional Whisper-family backend.
-3. Parakeet TDT 0.6B v3: optional NVIDIA comparison backend.
-4. Canary 1B v2: optional NVIDIA comparison or benchmark backend.
+1. **faster-whisper**: recommended default.
+2. **WhisperX**: optional Whisper-family backend.
+3. **Parakeet TDT 0.6B v3**: preferred NVIDIA comparison backend.
+4. **Canary 1B v2**: optional NVIDIA comparison or benchmark backend.
+
+---
+
+## Long-form Audio Chunking
+
+NeMo models (Parakeet and Canary) are not designed to process massive 3+ hour audio tracks in a single transcription call, which can lead to catastrophic memory usage or timeouts. 
+
+### Conditional Chunking Rule
+
+- **Parakeet / Canary**: The pipeline automatically pre-splits long speaker audio files into shorter chunk files (default 60 seconds) with temporal overlaps (default 2 seconds) and processes them sequentially before reconstructing the speaker track.
+- **WhisperX / faster-whisper**: Skip the chunking module entirely. Whisper-based backends use their own built-in long-form sliding window behaviors and should not have audio pre-split.
+
+### Audio Chunker Features
+
+1. **Audio Normalization**: During chunking, tracks are automatically downmixed to mono, resampled (default 16 kHz), and output as WAV or FLAC.
+2. **Chunk Caching**: A file modified-timestamp (`mtime`) and size check is kept in `output/chunks/chunk_manifest.json`. Unchanged tracks are not re-split unless `--force-chunks` is provided.
+3. **CUDA OOM Fallback Retry Sequence**: If a chunk fails with a CUDA out-of-memory error:
+   - Clear CUDA GPU Cache.
+   - Retry with smaller chunk size setting (first **30 seconds**, then **15 seconds** if needed).
+   - If the chunk fails at 15 seconds, it is marked as failed in the quality report.
+   - Continue processing if `continue_on_error` is true.
+4. **Boundary Overlap Deduplication**: In the overlap window between adjacent chunks, text segments and word intervals are compared. The pipeline resolves duplicates by:
+   - Selecting the segment with higher transcription confidence.
+   - Falling back to the segment farther from the chunk boundary if confidence is identical/unavailable.
+   - Deduplication decisions are appended to the quality report.
+
+---
+
+## Progress Reporting
+
+Transcription progress is reported using actual processed duration units, rather than generic file count metrics (which are misleading for long sessions where individual files represent hours of audio).
+
+### Progress Readout (NeMo backends)
+
+Displays in the terminal:
+- Current speaker track.
+- Completed chunks / Total chunks for speaker.
+- Processed speaker audio duration / Total speaker audio duration.
+- Overall processed session audio duration / Total session audio duration.
+- Elapsed time and estimated remaining time (ETA).
+- Processing speed in `audio minutes / wall-clock minutes`.
+
+Example:
+
+```text
+Transcribing campaign-session-018 with parakeet
+Speaker: player_01 / Kibiw
+Chunk: 42 / 186
+Audio processed: 42.0 min / 186.0 min
+Overall audio processed: 252.0 min / 1116.0 min
+Elapsed: 00:38:12 | ETA: 02:10:45 | Speed: 6.6 audio-min / wall-min
+```
+
+To disable progress printing, run with `--no-progress`.
+
+---
 
 ## Craig Speaker-Track Audio
 
@@ -286,28 +347,44 @@ session_manifest.yaml
 
 Use stable `speaker_id` values because they become foreign keys in the exported CSV/JSON records. Use `display_name` for the human-readable speaker name and `character_name` for the D&D character when applicable.
 
-The default faster-whisper backend sends manifest audio files directly to the transcription provider. Craig `.flac` files do not need to be remuxed to WAV first. If you run Parakeet or Canary and a Craig `.flac` track is stereo or otherwise multi-channel, the pipeline creates a local mono FLAC in `output/prepared_audio/` and sends that to NeMo because NeMo expects ASR input shaped as one audio channel.
+---
 
-Use `--normalize-audio` only if a backend has trouble reading the source file or you explicitly want local mono 16 kHz WAV files instead of mono FLAC in `output/prepared_audio/`:
+## Session Manifest Configuration
 
-```bash
-python transcribe.py --manifest session_manifest.yaml --normalize-audio
-```
-
-## Session Manifest
+Manifest YAML files represent a single session run:
 
 ```yaml
 session:
-  id: "campaign-session-id"
+  id: "campaign-session-018"
   campaign: "Campaign Name"
-  session_number: 1
-  session_date: "YYYY-MM-DD"
+  session_number: 18
+  session_date: "2026-06-07"
   source: "craig"
 
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_seconds: 60
+  overlap_seconds: 2
+  min_chunk_seconds: 15
+  chunk_format: "wav"
+
 transcription:
-  backend: faster-whisper
-  model: large-v3
-  device: cuda
+  backend: "parakeet"
+  model: "nvidia/parakeet-tdt-0.6b-v3"
+  device: "cuda"
+  batch_size: 1
+  precision: "float16"
+  continue_on_error: true
+  retry_on_oom: true
+  oom_retry_chunk_seconds:
+    - 30
+    - 15
+
+progress:
+  enabled: true
+  show_eta: true
+  update_interval_seconds: 5
 
 speakers:
   - speaker_id: "dm"
@@ -319,78 +396,124 @@ speakers:
   - speaker_id: "player_01"
     display_name: "Player Name"
     role: "Player"
-    character_name: "Character Name"
+    character_name: "Kibiw"
     file: "audio/player_01.flac"
 
+glossary_sources:
+  - "../glossaries/campaign.yaml"
+  - "../glossaries/characters.yaml"
+  - "../glossaries/locations.yaml"
+  - "../glossaries/rules.yaml"
+  - "../glossaries/session_018.yaml"
+
+workflow:
+  mode: "draft"
+  generate_candidate_glossary: true
+```
+
+---
+
+## Glossary Design
+
+Glossaries are decoupled from manifest session files. The glossary is optional; an empty glossary configuration is valid.
+
+Glossary files support both simple string entries and structured entries:
+
+```yaml
 glossary:
   pcs:
-    - "Thava"
-    - "Brother Alden"
+    - canonical: "Kibiw"
+      type: "pc"
+      aliases:
+        - "Kibew"
+        - "Kibu"
+
+  familiars:
+    - canonical: "Batty"
+      type: "familiar"
+      description: "Kibiw's familiar."
+      related_to:
+        - entity: "Kibiw"
+          relationship: "familiar_of"
+
   npcs:
-    - "Volo"
-    - "Laeral Silverhand"
-  locations:
-    - "Waterdeep"
-    - "Yawning Portal"
-  factions:
-    - "Harpers"
-    - "Zhentarim"
-  items:
-    - "Stone of Golorr"
-    - "Bag of Holding"
-  spells:
-    - "Counterspell"
-    - "Misty Step"
-  rules_terms:
-    - "Dex save"
-    - "Insight check"
-  custom_terms:
-    - "Session zero"
-    - "The Black Door"
+    - canonical: "Lady Saris"
+      type: "npc"
+      aliases:
+        - "Saris"
+        - "Lady Sarahs"
+      description: "NPC who may be referred to as either Saris or Lady Saris."
 ```
 
-The glossary values above are examples only. Replace them with the actual player characters, NPCs, places, factions, items, spells, rules phrases, and table-specific terms from your campaign before running transcription.
+Legacy string lists are also supported:
 
-## Run
+```yaml
+glossary:
+  pcs:
+    - "Kibiw"
+    - "Eldrin"
+```
+
+Internally, both formats are normalized into structured records. Case variations and aliases are mapped directly to their canonical spellings.
+
+---
+
+## Progressive Glossary Workflow
+
+You do not need to compile an exhaustive campaign glossary before transcribing.
+
+### 1. Draft Mode
 
 ```bash
-python transcribe.py --manifest session_manifest.yaml
+python transcribe.py --manifest session_018/manifest.yaml --mode draft
 ```
 
-Useful overrides:
+Runs the audio preparation, chunking, ASR transcription (or loads raw cached model results if `--skip-transcription` is passed), applies existing glossary rules, and exports:
+- `output/draft/transcript_turns.draft.csv`
+- `output/draft/transcript_words.draft.csv`
+- `output/draft/candidate_glossary.yaml`
+- `output/draft/unknown_terms_report.csv`
+
+During draft runs, candidate proper nouns and repeated low-confidence terms are extracted. Evidence turn IDs and text contexts are bundled in `candidate_glossary.yaml` so you can easily review them.
+
+### 2. Finalize Mode
 
 ```bash
-python transcribe.py --manifest session_manifest.yaml --output output
-python transcribe.py --manifest session_manifest.yaml --backend parakeet --model nvidia/parakeet-tdt-0.6b-v3
-python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
-python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
-python transcribe.py --manifest session_manifest.yaml --skip-transcription
-python transcribe.py --manifest session_manifest.yaml --normalize-audio
+python transcribe.py --manifest session_018/manifest.yaml --mode finalize
 ```
 
-`--skip-transcription` reuses raw provider JSON from `output/raw/<backend>/<speaker_id>.raw.json`, which is helpful while iterating on normalization and exports.
+Loads the raw transcript data directly from the draft CSV files and applies the reviewed glossary. **This does not run model transcription or require a GPU**, completing in seconds. It updates and regenerates:
+- NocoDB CSVs and Session JSON
+- VTT and Markdown files
+- Quality reports and agent files
 
-If `--output` is omitted, outputs are written to an `output/` folder beside the manifest file. For example, `python transcribe.py --manifest campaigns/session_12/session_manifest.yaml` writes to `campaigns/session_12/output/`.
+---
 
-## Pipeline
+## CLI Options
 
-1. Load `session_manifest.yaml`.
-2. Validate all listed audio files exist.
-3. Inspect audio duration, sample rate, channel count, format, and codec with `ffprobe`.
-4. Send source audio directly to faster-whisper or WhisperX, downmix multi-channel audio to mono FLAC for NeMo backends when needed, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
-5. Transcribe each known speaker track independently.
-6. Preserve raw local model output for debugging.
-7. Normalize provider output into canonical word and turn records.
-8. Merge speaker tracks chronologically.
-9. Run conservative glossary and rules-based cleanup without overwriting raw text.
-10. Generate glossary candidates for future manifest updates.
-11. Generate a transcript quality report.
-12. Generate time-based chunks.
-13. Export NocoDB-ready CSV files.
-14. Export agent-ready JSONL and chunk JSON.
-15. Export human-readable Markdown and optional VTT.
+```bash
+# Standard draft transcription
+python transcribe.py --manifest session_manifest.yaml --mode draft
 
-## Output
+# Skip transcribing and reuse raw provider json (useful for testing corrections)
+python transcribe.py --manifest session_manifest.yaml --mode draft --skip-transcription
+
+# Force audio re-chunking for Parakeet/Canary runs
+python transcribe.py --manifest session_manifest.yaml --mode draft --force-chunks
+
+# Resume failed or missing chunks in Parakeet/Canary ASR runs
+python transcribe.py --manifest session_manifest.yaml --mode draft --resume
+
+# Disable status display
+python transcribe.py --manifest session_manifest.yaml --mode draft --no-progress
+
+# Run fast finalization after glossary updates
+python transcribe.py --manifest session_manifest.yaml --mode finalize
+```
+
+---
+
+## Outputs
 
 ```text
 output/
@@ -402,11 +525,27 @@ output/
   transcript_corrections.csv
   transcript_chunks.csv
   transcript_quality_report.json
-  glossary_candidates.csv
-  glossary_candidates.json
 
-  agents/
-    turns.jsonl
+  chunks/
+    chunk_manifest.json
+    player_01/
+      player_01_chunk_00000.wav
+      player_01_chunk_00001.wav
+
+  raw/
+    parakeet/
+      player_01/
+        player_01_chunk_00000.raw.json
+        player_01_chunk_00001.raw.json
+
+  draft/
+    transcript_turns.draft.csv
+    transcript_words.draft.csv
+    candidate_glossary.yaml
+    unknown_terms_report.csv
+
+  agent/
+    agent_turns.jsonl
     chunks/
       chunk_001.json
       chunk_002.json
@@ -420,97 +559,28 @@ output/
 
   vtt/
     merged.vtt
-
-  raw/
-    faster-whisper/
-      speaker_id.raw.json
 ```
 
-## Canonical CSV Columns
+---
 
-`transcript_turns.csv`:
+## Database and Agent Integration
 
-```text
-session_id,turn_id,speaker_id,speaker_name,character_name,start_seconds,end_seconds,duration_seconds,text_raw,text_cleaned,confidence_avg,word_count,source_file,backend,model
-```
+### NocoDB Import
 
-`transcript_words.csv`:
+Import the CSV files in `output/` directly into NocoDB as tables. Set up relationships using:
+- `session_id` as session foreign key.
+- `speaker_id` as speaker foreign key.
+- `turn_id` as turn foreign key.
+- `chunk_id` for time-based bounds.
 
-```text
-session_id,turn_id,word_id,speaker_id,word,start_seconds,end_seconds,confidence,is_low_confidence,backend,model
-```
+### Agent Consumption
 
-`transcript_corrections.csv`:
+Recap agents (e.g. Hermes, OpenClaw) should consume:
+- `output/agent/agent_turns.jsonl` (contains stable turn IDs, speaker/character metadata, raw and glossary-corrected texts, confidence scores, and low-confidence terms).
+- `output/agent/chunks/chunk_###.json` for chunk-by-chunk summarization.
+- `output/agent/session_summary_input.md` as an index page.
 
-```text
-session_id,turn_id,correction_id,original_text,corrected_text,correction_type,reason,confidence
-```
-
-`glossary_candidates.csv`:
-
-```text
-session_id,candidate_id,term,candidate_type,suggested_glossary_bucket,reason,example_text,speaker_id,turn_id,start_seconds,end_seconds,confidence,occurrence_count
-```
-
-## Conservative Cleanup
-
-Raw text is always preserved in `text_raw`. `text_cleaned` only applies conservative rule and glossary corrections, such as:
-
-```text
-water deep -> Waterdeep
-counter spell -> Counterspell
-deck save -> Dex save
-inside check -> Insight check
-```
-
-The pipeline does not freely rewrite transcript text with an LLM.
-
-## Glossary Candidates
-
-After each run, review `output/glossary_candidates.csv` or `output/glossary_candidates.json` for possible terms to add to future manifests. These files are suggestions only; the pipeline does not automatically edit `session_manifest.yaml`.
-
-Candidate entries are generated from repeated low-confidence words, unfamiliar capitalized terms, and phrases that triggered conservative correction rules. Use the `suggested_glossary_bucket` value as a starting point, then move terms into the bucket that fits your campaign.
-
-## Quality Report
-
-`transcript_quality_report.json` flags:
-
-- empty or near-empty speaker tracks
-- unusual silence gaps
-- very long segments
-- repeated phrase loops
-- impossible or overlapping timestamps
-- low-confidence words
-- likely glossary mismatches
-- possible fantasy-name errors
-- source audio duration mismatches
-
-## NocoDB Import
-
-Import the CSV files as separate NocoDB tables. Suggested table names:
-
-- `sessions` from `session.json`
-- `speakers` from `speakers.csv`
-- `transcript_turns` from `transcript_turns.csv`
-- `transcript_words` from `transcript_words.csv`
-- `transcript_entities` from `transcript_entities.csv`
-- `transcript_corrections` from `transcript_corrections.csv`
-- `transcript_chunks` from `transcript_chunks.csv`
-
-Use `session_id`, `speaker_id`, `turn_id`, `word_id`, and `chunk_id` as stable identifiers when creating relationships.
-
-## Agent Consumption
-
-Use `output/agents/turns.jsonl` as the canonical chronological input for recap agents. Each JSONL record includes session metadata, stable turn ID, speaker metadata, character metadata, timestamps, raw text, cleaned text, confidence metadata, correction candidates, and tags.
-
-Use `output/agents/chunks/chunk_###.json` for bounded summarization passes, then combine chunk notes into a final recap. `output/agents/session_summary_input.md` provides a compact index for agent orchestration.
-
-## Notes
-
-- This project is local-first by design.
-- Speaker identity comes from the manifest.
-- VTT and Markdown are exports, not the data model.
-- Hosted transcription services and API-key workflows are out of scope for v2.
+---
 
 ## License
 

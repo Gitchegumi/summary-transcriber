@@ -17,8 +17,16 @@ def apply_corrections(turns: list[dict], glossary: GlossaryConfig) -> tuple[list
     cleaned_turns = []
     corrections = []
     patterns = dict(DEFAULT_CORRECTIONS)
-    for term in glossary.all_terms():
-        patterns.setdefault(term.lower(), term)
+
+    # Prioritize glossary terms. Map both canonical and aliases.
+    if glossary and hasattr(glossary, "entries"):
+        for entries_list in glossary.entries.values():
+            for entry in entries_list:
+                if entry.canonical:
+                    patterns[entry.canonical.lower()] = entry.canonical
+                    for alias in entry.aliases:
+                        if alias:
+                            patterns[alias.lower()] = entry.canonical
 
     for turn in turns:
         updated = dict(turn)

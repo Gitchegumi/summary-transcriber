@@ -6,19 +6,22 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.audio.inspect import inspect_audio
 from src.audio.prepare import needs_mono_downmix, prepare_audio, prepare_mono_flac
+from src.audio.chunk import chunk_speaker_audio
 from src.config.manifest import load_manifest
 from src.enrich.chunks import build_chunks
 from src.enrich.corrections import apply_corrections
 from src.enrich.entities import extract_entities
 from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
+from src.progress.reporter import ProgressReporter, format_duration
 from src.exports.agents import export_agents
-from src.exports.glossary import export_glossary_candidates
+from src.exports.glossary import export_glossary_candidates, export_draft_outputs
 from src.exports.markdown import export_markdown
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
@@ -57,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mode",
+        choices=["draft", "finalize"],
+        default="draft",
+        help="Pipeline workflow mode: draft (transcribe and check glossary candidates) or finalize (apply corrections and export).",
+    )
+    parser.add_argument(
         "--backend",
         choices=sorted(PROVIDERS),
         help="Override transcription.backend from the manifest.",
@@ -80,9 +89,19 @@ def parse_args() -> argparse.Namespace:
         help="Prepare mono 16 kHz WAV files before transcription instead of using direct or mono-FLAC input.",
     )
     parser.add_argument(
-        "--no-audio-normalize",
+        "--force-chunks",
         action="store_true",
-        help=argparse.SUPPRESS,
+        help="Force re-chunking of audio files even if they are unchanged.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume transcription, skipping chunks that have already been successfully transcribed.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress reporting readout.",
     )
     return parser.parse_args()
 
@@ -103,6 +122,43 @@ def load_raw_output(raw_dir: Path, backend: str, speaker_id: str) -> dict:
         )
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing draft file: {path}")
+    import csv
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        
+        # Coerce types for fields
+        for row in rows:
+            if "start_seconds" in row and row["start_seconds"] != "":
+                row["start_seconds"] = float(row["start_seconds"])
+            if "end_seconds" in row and row["end_seconds"] != "":
+                row["end_seconds"] = float(row["end_seconds"])
+            if "duration_seconds" in row and row["duration_seconds"] != "":
+                row["duration_seconds"] = float(row["duration_seconds"])
+            if "confidence_avg" in row and row["confidence_avg"] != "":
+                row["confidence_avg"] = float(row["confidence_avg"])
+            if "word_count" in row and row["word_count"] != "":
+                row["word_count"] = int(row["word_count"])
+            if "confidence" in row and row["confidence"] != "":
+                row["confidence"] = float(row["confidence"])
+            if "is_low_confidence" in row:
+                row["is_low_confidence"] = str(row["is_low_confidence"]).lower() == "true"
+        return rows
+
+
+def resolve_output_dir(output_arg: str | None, manifest_path: Path) -> Path:
+    if output_arg is None:
+        return manifest_path.parent / "output"
+    return Path(output_arg).resolve()
+
+
+def requires_mono_provider_input(backend: str) -> bool:
+    return backend in {"parakeet", "canary"}
 
 
 def main() -> int:
@@ -126,35 +182,174 @@ def main() -> int:
         device=manifest.transcription.device,
         language=manifest.transcription.language,
     )
+
+    from src.normalize.turns import DEDUPLICATION_DECISIONS
+    DEDUPLICATION_DECISIONS.clear()
+
+    # --- FINALIZE MODE ---
+    if args.mode == "finalize":
+        draft_turns_path = output_dir / "draft" / "transcript_turns.draft.csv"
+        draft_words_path = output_dir / "draft" / "transcript_words.draft.csv"
+        
+        print("Finalize mode: loading draft outputs...")
+        try:
+            draft_turns = load_csv_rows(draft_turns_path)
+            draft_words = load_csv_rows(draft_words_path)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}. Please run draft mode first to generate draft files.", file=sys.stderr)
+            return 1
+            
+        print(f"Loaded {len(draft_turns)} draft turns, {len(draft_words)} draft words.")
+        
+        audio_reports = {}
+        for speaker in manifest.speakers:
+            source_path = manifest.resolve_path(speaker.file)
+            audio_reports[speaker.speaker_id] = inspect_audio(source_path)
+            
+        print("Applying glossary corrections...")
+        cleaned_turns, corrections = apply_corrections(draft_turns, manifest.glossary)
+        entities = extract_entities(cleaned_turns, manifest.glossary)
+        chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
+        
+        quality_report = build_quality_report(
+            manifest=manifest,
+            turns=cleaned_turns,
+            words=draft_words,
+            audio_reports=audio_reports,
+            corrections=corrections,
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            nemo_chunking_used=(manifest.transcription.backend in {"parakeet", "canary"}),
+            chunk_duration=manifest.audio.chunk_seconds,
+            wall_clock_time=0.0,
+        )
+        
+        print("Exporting canonical and export formats...")
+        export_nocodb(
+            output_dir=output_dir,
+            manifest=manifest,
+            turns=cleaned_turns,
+            words=draft_words,
+            entities=entities,
+            corrections=corrections,
+            chunks=chunks,
+            quality_report=quality_report,
+            audio_reports=audio_reports,
+        )
+        export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
+        export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
+        export_vtt(output_dir / "vtt", cleaned_turns)
+        
+        print("\nFinalize mode complete.")
+        print(f"Wrote {len(cleaned_turns)} turns, {len(draft_words)} words, {len(chunks)} chunks.")
+        return 0
+
+    # --- DRAFT MODE ---
     provider = get_provider(provider_context)
+
+    audio_reports = {}
+    for speaker in manifest.speakers:
+        source_path = manifest.resolve_path(speaker.file)
+        audio_reports[speaker.speaker_id] = inspect_audio(source_path)
+
+    is_nemo = provider_context.backend in {"parakeet", "canary"}
+    all_chunks = {}
+    total_chunks = 0
+    total_audio_seconds = 0.0
+
+    if is_nemo:
+        print("Preparing audio chunks for NeMo backend...")
+        for speaker in manifest.speakers:
+            chunks_meta = chunk_speaker_audio(
+                manifest=manifest,
+                speaker=speaker,
+                output_dir=output_dir,
+                force_chunks=args.force_chunks,
+            )
+            all_chunks[speaker.speaker_id] = chunks_meta
+            total_chunks += len(chunks_meta)
+            total_audio_seconds += audio_reports[speaker.speaker_id]["duration_seconds"]
+        print(f"Total chunks to process: {total_chunks} across all speakers.")
+
+    progress_enabled = manifest.progress.enabled and not args.no_progress
+    update_interval = manifest.progress.update_interval_seconds
+    
+    reporter = ProgressReporter(
+        session_id=manifest.session.id,
+        backend=provider_context.backend,
+        enabled=progress_enabled,
+        update_interval_seconds=update_interval,
+    )
+    if is_nemo:
+        reporter.init_totals(total_chunks, total_audio_seconds)
 
     all_turns = []
     all_words = []
-    audio_reports = {}
+    speaker_raw_outputs = {}
+    
+    oom_events = []
+    retried_chunks = []
+    failed_chunks = []
+    chunk_counts = {}
 
-    print(f"Session: {manifest.session.id}")
-    print(f"Backend: {provider_context.backend} ({provider_context.model})")
-    print(f"Output: {output_dir}")
+    start_wall_time = time.time()
 
     for speaker in manifest.speakers:
         source_path = manifest.resolve_path(speaker.file)
-        print(f"\nInspecting {speaker.speaker_id}: {source_path}")
-        audio_info = inspect_audio(source_path)
-        audio_reports[speaker.speaker_id] = audio_info
         prepared_path = source_path
+        
         if args.normalize_audio:
             prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
-        elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_info):
+        elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
             prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
-        print(f"Audio input: {prepared_path}")
 
         if args.skip_transcription:
             raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
         else:
-            print(f"Transcribing {speaker.speaker_id} locally...")
-            raw_output = provider.transcribe(prepared_path, speaker)
+            if is_nemo:
+                speaker_chunks = all_chunks[speaker.speaker_id]
+                speaker_audio_dur = audio_reports[speaker.speaker_id]["duration_seconds"]
+                
+                reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name,
+                    speaker_chunks_total=len(speaker_chunks),
+                    speaker_audio_total=speaker_audio_dur,
+                )
+                
+                def progress_cb(chunk_duration):
+                    reporter.complete_chunk(chunk_duration)
+                    
+                raw_output = provider.transcribe(
+                    audio_path=prepared_path,
+                    speaker=speaker,
+                    chunks=speaker_chunks,
+                    resume=args.resume,
+                    output_dir=output_dir,
+                    progress_callback=progress_cb,
+                    sample_rate=manifest.audio.sample_rate,
+                    chunk_format=manifest.audio.chunk_format,
+                    overlap_seconds=manifest.audio.overlap_seconds,
+                )
+            else:
+                if progress_enabled:
+                    print(f"[{format_duration(time.time() - start_wall_time)}] Transcribing speaker {speaker.speaker_id}...")
+                
+                raw_output = provider.transcribe(prepared_path, speaker)
+                
+                if progress_enabled:
+                    print(f"[{format_duration(time.time() - start_wall_time)}] Completed transcribing {speaker.speaker_id}.")
 
         export_raw(raw_dir, provider_context.backend, speaker.speaker_id, raw_output)
+        speaker_raw_outputs[speaker.speaker_id] = raw_output
+
+        if "oom_events" in raw_output:
+            oom_events.extend(raw_output["oom_events"])
+        if "retried_chunks" in raw_output:
+            retried_chunks.extend(raw_output["retried_chunks"])
+        if "failed_chunks" in raw_output:
+            failed_chunks.extend(raw_output["failed_chunks"])
+        if "chunks" in raw_output:
+            chunk_counts[speaker.speaker_id] = len(raw_output["chunks"])
 
         turns = normalize_turns(
             manifest=manifest,
@@ -174,16 +369,23 @@ def main() -> int:
         all_turns.extend(turns)
         all_words.extend(words)
 
+    reporter.finish()
+    
+    wall_clock_time = time.time() - start_wall_time
+
     merged_turns = merge_turns(all_turns)
     cleaned_turns, corrections = apply_corrections(merged_turns, manifest.glossary)
     entities = extract_entities(cleaned_turns, manifest.glossary)
+    
     glossary_candidates = build_glossary_candidates(
         manifest=manifest,
         turns=cleaned_turns,
         words=all_words,
         corrections=corrections,
     )
+    
     chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
+    
     quality_report = build_quality_report(
         manifest=manifest,
         turns=cleaned_turns,
@@ -191,6 +393,14 @@ def main() -> int:
         audio_reports=audio_reports,
         corrections=corrections,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        speaker_raw_outputs=speaker_raw_outputs,
+        oom_events=oom_events,
+        retried_chunks=retried_chunks,
+        failed_chunks=failed_chunks,
+        deduplication_decisions=list(DEDUPLICATION_DECISIONS),
+        nemo_chunking_used=is_nemo,
+        chunk_duration=manifest.audio.chunk_seconds,
+        wall_clock_time=wall_clock_time,
     )
 
     export_nocodb(
@@ -205,26 +415,35 @@ def main() -> int:
         audio_reports=audio_reports,
     )
     export_glossary_candidates(output_dir, glossary_candidates)
+    export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
     export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
     export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
     export_vtt(output_dir / "vtt", cleaned_turns)
 
-    print("\nDone.")
+    # Print summary to console
+    total_audio_seconds = sum(info.get("duration_seconds", 0) for info in audio_reports.values())
+    avg_speed = (total_audio_seconds / 60.0) / (wall_clock_time / 60.0) if wall_clock_time > 0 else 0.0
+    
+    print("\n--- Transcription Summary ---")
+    print(f"Backend: {provider_context.backend}")
+    print(f"Model: {provider_context.model}")
+    print(f"Total Audio Duration: {format_duration(total_audio_seconds)} ({total_audio_seconds/60.0:.1f} minutes)")
+    print(f"Total Wall-clock Time: {format_duration(wall_clock_time)}")
+    print(f"Average Processing Speed: {avg_speed:.1f} audio-min / wall-min")
+    if is_nemo:
+        print(f"Total Chunks: {total_chunks}")
+        print(f"Failed Chunks: {len(failed_chunks)}")
+        print(f"Retried Chunks: {len(retried_chunks)}")
+        print(f"CUDA OOM Events: {len(oom_events)}")
+        print(f"Boundary Deduplications: {len(DEDUPLICATION_DECISIONS)}")
+    print("-----------------------------\n")
+
+    print("Done.")
     print(
         f"Wrote {len(cleaned_turns)} turns, {len(all_words)} words, "
         f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates."
     )
     return 0
-
-
-def resolve_output_dir(output_arg: str | None, manifest_path: Path) -> Path:
-    if output_arg is None:
-        return manifest_path.parent / "output"
-    return Path(output_arg).resolve()
-
-
-def requires_mono_provider_input(backend: str) -> bool:
-    return backend in {"parakeet", "canary"}
 
 
 if __name__ == "__main__":

@@ -13,35 +13,107 @@ def normalize_words(
     backend: str,
     model: str,
 ) -> list[dict]:
-    segments = raw_output.get("result", raw_output)
-    if isinstance(segments, dict):
-        segments = segments.get("segments", [])
-    words: list[dict] = []
+    if "chunks" not in raw_output:
+        # Standard non-chunked path
+        segments = raw_output.get("result", raw_output)
+        if isinstance(segments, dict):
+            segments = segments.get("segments", [])
+        words: list[dict] = []
 
-    for turn_index, turn in enumerate(turns):
-        segment = segments[turn_index] if isinstance(segments, list) and turn_index < len(segments) else {}
-        segment_words = _segment_words(segment)
-        if not segment_words:
-            segment_words = _fallback_words(turn)
-        for word_index, word in enumerate(segment_words, start=1):
-            text = str(word.get("word") or word.get("text") or "").strip()
-            confidence = word.get("confidence") or word.get("probability") or word.get("score")
-            confidence = float(confidence) if confidence is not None else None
-            words.append(
-                {
-                    "session_id": manifest.session.id,
-                    "turn_id": turn["turn_id"],
-                    "word_id": f"{turn['turn_id']}-word-{word_index:04d}",
-                    "speaker_id": speaker.speaker_id,
-                    "word": text,
-                    "start_seconds": float(word.get("start") or turn["start_seconds"]),
-                    "end_seconds": float(word.get("end") or turn["end_seconds"]),
-                    "confidence": confidence,
-                    "is_low_confidence": confidence is not None and confidence < 0.6,
-                    "backend": backend,
-                    "model": model,
-                }
-            )
+        for turn_index, turn in enumerate(turns):
+            segment = segments[turn_index] if isinstance(segments, list) and turn_index < len(segments) else {}
+            segment_words = _segment_words(segment)
+            if not segment_words:
+                segment_words = _fallback_words(turn)
+            for word_index, word in enumerate(segment_words, start=1):
+                text = str(word.get("word") or word.get("text") or "").strip()
+                confidence = word.get("confidence") or word.get("probability") or word.get("score")
+                confidence = float(confidence) if confidence is not None else None
+                words.append(
+                    {
+                        "session_id": manifest.session.id,
+                        "turn_id": turn["turn_id"],
+                        "word_id": f"{turn['turn_id']}-word-{word_index:04d}",
+                        "speaker_id": speaker.speaker_id,
+                        "word": text,
+                        "start_seconds": float(word.get("start") or turn["start_seconds"]),
+                        "end_seconds": float(word.get("end") or turn["end_seconds"]),
+                        "confidence": confidence,
+                        "is_low_confidence": confidence is not None and confidence < 0.6,
+                        "backend": backend,
+                        "model": model,
+                    }
+                )
+        return words
+
+    # Chunked path
+    # Build temp_to_final mapping
+    temp_to_final = {}
+    for turn in turns:
+        if "_temp_turn_id" in turn:
+            temp_to_final[turn["_temp_turn_id"]] = turn["turn_id"]
+
+    words = []
+    for chunk in raw_output["chunks"]:
+        chunk_id = chunk["chunk_id"]
+        chunk_start = chunk["chunk_start_seconds"]
+        raw_result = chunk["raw_result"]
+
+        segments = raw_result.get("result", raw_result)
+        if isinstance(segments, dict):
+            segments = segments.get("segments", [])
+        elif not isinstance(segments, list):
+            segments = []
+
+        for segment_index, segment in enumerate(segments, start=1):
+            temp_turn_id = f"{manifest.session.id}-{speaker.speaker_id}-{chunk_id}-turn-{segment_index:05d}"
+            if temp_turn_id not in temp_to_final:
+                # Discarded during deduplication
+                continue
+
+            final_turn_id = temp_to_final[temp_turn_id]
+            segment_words = _segment_words(segment)
+            if not segment_words:
+                # Find turn and use fallback words
+                matched_turn = next(t for t in turns if t["turn_id"] == final_turn_id)
+                segment_words = _fallback_words(matched_turn)
+                for word_index, w in enumerate(segment_words, start=1):
+                    words.append(
+                        {
+                            "session_id": manifest.session.id,
+                            "turn_id": final_turn_id,
+                            "word_id": f"{final_turn_id}-word-{word_index:04d}",
+                            "speaker_id": speaker.speaker_id,
+                            "word": w["word"],
+                            "start_seconds": w["start"],
+                            "end_seconds": w["end"],
+                            "confidence": None,
+                            "is_low_confidence": False,
+                            "backend": backend,
+                            "model": model,
+                        }
+                    )
+                continue
+
+            for word_index, w in enumerate(segment_words, start=1):
+                text = str(w.get("word") or w.get("text") or "").strip()
+                confidence = w.get("confidence") or w.get("probability") or w.get("score")
+                confidence = float(confidence) if confidence is not None else None
+                words.append(
+                    {
+                        "session_id": manifest.session.id,
+                        "turn_id": final_turn_id,
+                        "word_id": f"{final_turn_id}-word-{word_index:04d}",
+                        "speaker_id": speaker.speaker_id,
+                        "word": text,
+                        "start_seconds": float(w.get("start") or 0) + chunk_start,
+                        "end_seconds": float(w.get("end") or 0) + chunk_start,
+                        "confidence": confidence,
+                        "is_low_confidence": confidence is not None and confidence < 0.6,
+                        "backend": backend,
+                        "model": model,
+                    }
+                )
     return words
 
 

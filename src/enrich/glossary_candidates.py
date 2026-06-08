@@ -187,20 +187,11 @@ def _turn_by_id(turns: list[dict], turn_id: str) -> dict | None:
 
 def _bucket_for_term(term: str, glossary: GlossaryConfig) -> str:
     term_lower = term.lower()
-    bucket_map = {
-        "pcs": glossary.pcs,
-        "npcs": glossary.npcs,
-        "locations": glossary.locations,
-        "factions": glossary.factions,
-        "items": glossary.items,
-        "spells": glossary.spells,
-        "rules_terms": glossary.rules_terms,
-        "custom_terms": glossary.custom_terms,
-    }
-    for bucket, values in bucket_map.items():
-        if any(value.lower() == term_lower for value in values):
-            return bucket
+    if glossary and hasattr(glossary, "entries"):
+        for bucket, entries in glossary.entries.items():
+            for entry in entries:
+                if entry.canonical.lower() == term_lower or any(alias.lower() == term_lower for alias in entry.aliases):
+                    return bucket
     if "save" in term_lower or "check" in term_lower:
         return "rules_terms"
     return "custom_terms"
-    "from",
