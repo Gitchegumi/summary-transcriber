@@ -89,11 +89,23 @@ The CLI defaults to `device: cuda`. Use `device: cpu` only for short tests or wh
 
 ### Install CUDA-enabled PyTorch
 
-Do this inside the same virtual environment you use for this project. If you already installed CPU-only PyTorch, uninstall it first:
+Use a Python version that has matching CUDA PyTorch wheels and is supported by the NVIDIA stack. Python 3.12 is the safest Windows choice for this project right now. Avoid Python 3.13 for the NVIDIA backend unless the PyTorch selector and NeMo install both explicitly support it for your chosen CUDA build.
+
+If you need a fresh NVIDIA environment, create it with Python 3.12, then activate it:
 
 ```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
+python3.12 -m venv .nvidia-venv
+.\.nvidia-venv\Scripts\Activate.ps1  # Windows
+# source .nvidia-venv/bin/activate   # macOS/Linux
+python -m pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+If you already installed CPU-only PyTorch, or mixed CPU/CUDA package variants, uninstall all three PyTorch packages first:
+
+```bash
+.\.nvidia-venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .nvidia-venv/bin/activate   # macOS/Linux, if not already active
 pip uninstall -y torch torchvision torchaudio
 ```
 
@@ -105,15 +117,17 @@ Then use the official PyTorch selector:
 4. Choose `Pip`.
 5. Choose `Python`.
 6. Choose a CUDA compute platform. The current selector lists CUDA 11.8, 12.6, and 12.8; choose the newest CUDA option supported by your NVIDIA driver.
-7. Run the generated `pip install ... --index-url https://download.pytorch.org/whl/cu...` command inside `.venv`.
+7. Run the generated `pip install ... --index-url https://download.pytorch.org/whl/cu...` command inside the active venv.
+
+If `nvidia-smi` shows a newer CUDA UMD version than the PyTorch selector offers, that is okay. For example, a driver reporting CUDA 13.x can run PyTorch CUDA 12.6 or 12.8 wheels; choose one of the CUDA builds that PyTorch actually publishes for your Python version.
 
 Example for CUDA 12.6:
 
 > NOTE: You can check the CUDA version supported by your NVIDIA driver with `nvidia-smi` in a terminal. If your driver only supports an older CUDA version, install the corresponding PyTorch build instead of the newest one. Use the [PyTorch Stable selector](https://pytorch.org/get-started/locally/) to generate the correct command.
 
 ```bash
-.\.venv\Scripts\Activate.ps1  # Windows, if not already active
-# source .venv/bin/activate   # macOS/Linux, if not already active
+.\.nvidia-venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .nvidia-venv/bin/activate   # macOS/Linux, if not already active
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 
@@ -124,6 +138,14 @@ python -c "import torch; print(torch.__version__); print('cuda available:', torc
 ```
 
 If `cuda available` prints `False`, Parakeet will fail when the manifest uses `device: cuda`. Fix PyTorch/CUDA first, or temporarily set `device: cpu` in the manifest.
+
+If you see `RuntimeError: operator torchvision::nms does not exist`, the venv probably has mismatched packages, such as CPU-only `torch` with CUDA `torchvision`. Remove all three packages and reinstall them from the same PyTorch selector command:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+python -c "import torch; import torchvision; import torchaudio; print(torch.__version__); print(torchvision.__version__); print(torchaudio.__version__); print('cuda available:', torch.cuda.is_available())"
+```
 
 ## Backend Installation
 
