@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.audio.inspect import inspect_audio
-from src.audio.prepare import prepare_audio
+from src.audio.prepare import needs_mono_downmix, prepare_audio, prepare_mono_flac
 from src.config.manifest import load_manifest
 from src.enrich.chunks import build_chunks
 from src.enrich.corrections import apply_corrections
@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--normalize-audio",
         action="store_true",
-        help="Prepare mono 16 kHz WAV files before transcription instead of sending source audio directly.",
+        help="Prepare mono 16 kHz WAV files before transcription instead of using direct or mono-FLAC input.",
     )
     parser.add_argument(
         "--no-audio-normalize",
@@ -144,6 +144,8 @@ def main() -> int:
         prepared_path = source_path
         if args.normalize_audio:
             prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+        elif needs_mono_downmix(audio_info):
+            prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
         print(f"Audio input: {prepared_path}")
 
         if args.skip_transcription:

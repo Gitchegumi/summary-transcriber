@@ -272,9 +272,9 @@ session_manifest.yaml
 
 Use stable `speaker_id` values because they become foreign keys in the exported CSV/JSON records. Use `display_name` for the human-readable speaker name and `character_name` for the D&D character when applicable.
 
-The pipeline sends manifest audio files directly to the transcription provider by default. Craig `.flac` files do not need to be remuxed to WAV first.
+The pipeline sends mono manifest audio files directly to the transcription provider by default. If a Craig `.flac` track is stereo or otherwise multi-channel, the pipeline creates a local mono FLAC in `output/prepared_audio/` and sends that to the provider, because NVIDIA NeMo expects ASR input shaped as one audio channel. Craig `.flac` files do not need to be remuxed to WAV first.
 
-Use `--normalize-audio` only if a backend has trouble reading the source file or you explicitly want local mono 16 kHz WAV files in `output/prepared_audio/`:
+Use `--normalize-audio` only if a backend has trouble reading the source file or you explicitly want local mono 16 kHz WAV files instead of mono FLAC in `output/prepared_audio/`:
 
 ```bash
 python transcribe.py --manifest session_manifest.yaml --normalize-audio
@@ -362,7 +362,7 @@ If `--output` is omitted, outputs are written to an `output/` folder beside the 
 1. Load `session_manifest.yaml`.
 2. Validate all listed audio files exist.
 3. Inspect audio duration, sample rate, channel count, format, and codec with `ffprobe`.
-4. Send source audio directly to the provider, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
+4. Send mono source audio directly to the provider, downmix multi-channel audio to mono FLAC when needed, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when `--normalize-audio` is used.
 5. Transcribe each known speaker track independently.
 6. Preserve raw local model output for debugging.
 7. Normalize provider output into canonical word and turn records.
