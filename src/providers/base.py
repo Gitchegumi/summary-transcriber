@@ -253,11 +253,12 @@ def _transcribe_chunk_with_retry(
         raise RuntimeError(f"ffmpeg clipping failed: {exc.stderr}")
 
     try:
-        from src.runtime.output import SuppressBackendOutput, configure_backend_logging
-        configure_backend_logging(verbose=verbose)
+        from src.runtime.output import suppress_backend_output, configure_quiet_backend_logging, configure_nemo_logging
+        configure_quiet_backend_logging(verbose=verbose)
+        configure_nemo_logging(verbose=verbose)
         
         # Load and run model transcription on the chunk
-        with SuppressBackendOutput(enabled=not verbose) as suppressor:
+        with suppress_backend_output(enabled=not verbose) as suppressor:
             result = model.transcribe([str(clip_file)], timestamps=True, verbose=verbose)
             
         raw_res = result[0] if isinstance(result, list) else result

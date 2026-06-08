@@ -17,6 +17,8 @@ class ParakeetProvider:
             return self._model
         try:
             from nemo.collections.asr.models import ASRModel
+            from src.runtime.output import configure_nemo_logging
+            configure_nemo_logging(verbose=getattr(self.context, "verbose", False))
         except ImportError as exc:
             raise RuntimeError(
                 "Parakeet requires local NVIDIA NeMo ASR packages. "
@@ -61,9 +63,10 @@ class ParakeetProvider:
             )
 
         # Fallback to full file if no chunks specified
-        from src.runtime.output import SuppressBackendOutput, configure_backend_logging
-        configure_backend_logging(verbose=verbose)
-        with SuppressBackendOutput(enabled=not verbose):
+        from src.runtime.output import suppress_backend_output, configure_quiet_backend_logging, configure_nemo_logging
+        configure_quiet_backend_logging(verbose=verbose)
+        configure_nemo_logging(verbose=verbose)
+        with suppress_backend_output(enabled=not verbose):
             result = model.transcribe([str(audio_path)], timestamps=True, verbose=verbose)
         item = result[0] if isinstance(result, list) else result
         from src.providers.base import _json_safe

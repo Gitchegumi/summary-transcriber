@@ -6,26 +6,45 @@ import contextlib
 import logging as py_logging
 import warnings
 
-def configure_backend_logging(verbose: bool = False) -> None:
-    """Configures NeMo and Lhotse logging levels depending on verbosity."""
-    level = py_logging.WARNING if not verbose else py_logging.DEBUG
+def configure_quiet_backend_logging(verbose: bool = False) -> None:
+    """Configures logging levels for loggers likely used by NeMo and Lhotse before NeMo is imported."""
+    level = py_logging.DEBUG if verbose else py_logging.ERROR
     
-    # Configure python standard logger for lhotse
-    py_logging.getLogger("lhotse").setLevel(level)
-    
-    # Suppress lhotse warnings specifically
+    loggers_to_mute = [
+        "nemo",
+        "nemo_logger",
+        "nemo.utils",
+        "nemo.collections",
+        "lhotse",
+        "pytorch_lightning",
+        "lightning",
+    ]
+    for name in loggers_to_mute:
+        logger = py_logging.getLogger(name)
+        logger.setLevel(level)
+        logger.propagate = verbose
+        
+    # Suppress warnings specifically from these modules
     if not verbose:
         warnings.filterwarnings("ignore", category=UserWarning, module="lhotse")
-        
-    # Configure NeMo logger dynamically if installed
+        warnings.filterwarnings("ignore", category=UserWarning, module="nemo.*")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning.*")
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+def configure_nemo_logging(verbose: bool = False) -> None:
+    """Configures NeMo's own logging level after NeMo is imported."""
+    level_name = "DEBUG" if verbose else "ERROR"
     try:
         from nemo.utils import logging as nemo_logging
-        nemo_logging.setLevel(level)
+        level_val = getattr(nemo_logging, level_name, nemo_logging.ERROR)
+        nemo_logging.setLevel(level_val)
     except ImportError:
         pass
 
 
-class SuppressBackendOutput:
+class suppress_backend_output:
     """Context manager to suppress stdout and stderr, capturing it in a buffer."""
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
