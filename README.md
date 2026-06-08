@@ -64,6 +64,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Keep this virtual environment active for every backend install command below. If you open a new terminal later, activate `.venv` again before running any `pip install ...` command.
+
 Install FFmpeg and make sure `ffmpeg` and `ffprobe` are on your `PATH`.
 
 ```bash
@@ -81,15 +83,15 @@ sudo apt update && sudo apt install ffmpeg
 
 Parakeet and Canary are large local ASR models. For practical long-session use, run on an NVIDIA GPU with a CUDA-enabled PyTorch installation. Install PyTorch for your CUDA version from the official PyTorch selector, then install the local ASR package you want to use.
 
-The CLI defaults to `device: cuda`. Use `device: cpu` only for short tests or when GPU acceleration is unavailable.
+The CLI defaults to `device: cuda`. Use `device: cpu` only for short tests or when GPU acceleration is unavailable. NVIDIA's current NeMo model documentation is Linux-centered; on Windows, WSL2 with NVIDIA CUDA support is usually the least surprising route for the NVIDIA backends.
 
-## Optional Local Backends
+## Backend Installation
 
-Install only the local backend packages you need.
+The script does not install transcription backends automatically. Install the backend package first, then run `transcribe.py`. Model checkpoints are fetched and cached locally by the backend the first time that backend loads a model.
 
-### Parakeet
+### Primary: Parakeet TDT 0.6B v3
 
-Use Parakeet as the default quality backend:
+Parakeet is the intended primary model for this project. Use it for normal D&D session transcription unless you have a specific reason to compare or fall back.
 
 ```yaml
 transcription:
@@ -98,25 +100,101 @@ transcription:
   device: cuda
 ```
 
-This backend expects NVIDIA NeMo ASR to be installed locally.
+With `.venv` active, install CUDA-enabled PyTorch first, then install NVIDIA NeMo ASR:
 
-### Canary Comparison
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install -U "nemo_toolkit[asr]"
+```
 
-Use Canary for comparison or benchmarking:
+Quick local check:
+
+```bash
+python -c "import nemo.collections.asr as nemo_asr; nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v3'); print('parakeet ready')"
+```
+
+Then run:
+
+```bash
+python transcribe.py --manifest session_manifest.yaml
+```
+
+### Optional Comparison: Canary 1B v2
+
+Canary is optional. Use it when you want a local comparison run or benchmark against Parakeet. It uses the same NVIDIA NeMo ASR install as Parakeet.
+
+```yaml
+transcription:
+  backend: canary
+  model: nvidia/canary-1b-v2
+  device: cuda
+```
+
+With `.venv` active, install CUDA-enabled PyTorch first, then install NVIDIA NeMo ASR if you have not already installed it for Parakeet:
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install -U "nemo_toolkit[asr]"
+```
+
+Quick local check:
+
+```bash
+python -c "import nemo.collections.asr as nemo_asr; nemo_asr.models.ASRModel.from_pretrained('nvidia/canary-1b-v2'); print('canary ready')"
+```
+
+Run Canary as an override:
 
 ```bash
 python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
 ```
 
-### WhisperX / faster-whisper Fallback
+### Optional Fallback: WhisperX
 
-Use WhisperX or faster-whisper when the NVIDIA stack is unavailable:
+WhisperX is optional. Use it when the NVIDIA NeMo stack is not available or when you want a local Whisper-family fallback.
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install whisperx
+```
+
+Run:
 
 ```bash
 python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
 ```
 
-The fallback is still local. Do not enable diarization for Craig speaker-track runs; the manifest already supplies authoritative speaker identity.
+Do not enable WhisperX diarization for Craig speaker-track runs; the manifest already supplies authoritative speaker identity. Diarization can require Hugging Face access and model agreements, which this project intentionally avoids.
+
+### Optional Fallback: faster-whisper
+
+The `whisperx` provider also falls back to faster-whisper if `whisperx` is not installed but `faster-whisper` is available.
+
+```bash
+.\.venv\Scripts\Activate.ps1  # Windows, if not already active
+# source .venv/bin/activate   # macOS/Linux, if not already active
+pip install faster-whisper
+```
+
+Run:
+
+```bash
+python transcribe.py --manifest session_manifest.yaml --backend faster-whisper --model large-v3
+```
+
+For GPU acceleration, faster-whisper also needs compatible NVIDIA cuBLAS/cuDNN libraries available to CTranslate2. CPU runs can use `device: cpu`, but long sessions will be slower.
+
+## Backend Priority
+
+Use the backends in this order:
+
+1. Parakeet TDT 0.6B v3: primary, intended default.
+2. Canary 1B v2: optional comparison or benchmark backend.
+3. WhisperX: optional local fallback.
+4. faster-whisper: optional local fallback when WhisperX is not installed.
 
 ## Craig Speaker-Track Audio
 
@@ -161,15 +239,33 @@ speakers:
     file: "audio/player_01.flac"
 
 glossary:
-  pcs: []
-  npcs: []
-  locations: []
-  factions: []
-  items: []
-  spells: []
-  rules_terms: []
-  custom_terms: []
+  pcs:
+    - "Thava"
+    - "Brother Alden"
+  npcs:
+    - "Volo"
+    - "Laeral Silverhand"
+  locations:
+    - "Waterdeep"
+    - "Yawning Portal"
+  factions:
+    - "Harpers"
+    - "Zhentarim"
+  items:
+    - "Stone of Golorr"
+    - "Bag of Holding"
+  spells:
+    - "Counterspell"
+    - "Misty Step"
+  rules_terms:
+    - "Dex save"
+    - "Insight check"
+  custom_terms:
+    - "Session zero"
+    - "The Black Door"
 ```
+
+The glossary values above are examples only. Replace them with the actual player characters, NPCs, places, factions, items, spells, rules phrases, and table-specific terms from your campaign before running transcription.
 
 ## Run
 
