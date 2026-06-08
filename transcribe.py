@@ -234,7 +234,6 @@ def main() -> int:
                     existing_data = json.load(f)
                     for k in [
                         "chunk_preparation_wall_clock_time",
-                        "total_source_audio_duration",
                         "total_chunks_expected",
                         "chunks_generated",
                         "chunks_reused",
