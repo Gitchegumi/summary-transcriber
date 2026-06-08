@@ -15,8 +15,10 @@ from src.config.manifest import load_manifest
 from src.enrich.chunks import build_chunks
 from src.enrich.corrections import apply_corrections
 from src.enrich.entities import extract_entities
+from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
 from src.exports.agents import export_agents
+from src.exports.glossary import export_glossary_candidates
 from src.exports.markdown import export_markdown
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
@@ -49,8 +51,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="output",
-        help="Output directory for canonical CSV/JSON, agent, Markdown, VTT, and raw files.",
+        help=(
+            "Output directory for canonical CSV/JSON, agent, Markdown, VTT, and raw "
+            "files. Defaults to an output/ folder next to the manifest."
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -69,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=30.0,
         help="Time-based transcript chunk size.",
+    )
+    parser.add_argument(
+        "--no-audio-normalize",
+        action="store_true",
+        help="Send manifest audio files directly to the provider instead of preparing mono 16 kHz WAV files.",
     )
     return parser.parse_args()
 
@@ -94,7 +103,7 @@ def load_raw_output(raw_dir: Path, backend: str, speaker_id: str) -> dict:
 def main() -> int:
     args = parse_args()
     manifest_path = Path(args.manifest).resolve()
-    output_dir = Path(args.output).resolve()
+    output_dir = resolve_output_dir(args.output, manifest_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = load_manifest(manifest_path)
@@ -127,7 +136,11 @@ def main() -> int:
         print(f"\nInspecting {speaker.speaker_id}: {source_path}")
         audio_info = inspect_audio(source_path)
         audio_reports[speaker.speaker_id] = audio_info
-        prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+        prepared_path = (
+            source_path
+            if args.no_audio_normalize
+            else prepare_audio(source_path, audio_info, output_dir / "prepared_audio")
+        )
 
         if args.skip_transcription:
             raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
@@ -158,6 +171,12 @@ def main() -> int:
     merged_turns = merge_turns(all_turns)
     cleaned_turns, corrections = apply_corrections(merged_turns, manifest.glossary)
     entities = extract_entities(cleaned_turns, manifest.glossary)
+    glossary_candidates = build_glossary_candidates(
+        manifest=manifest,
+        turns=cleaned_turns,
+        words=all_words,
+        corrections=corrections,
+    )
     chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
     quality_report = build_quality_report(
         manifest=manifest,
@@ -179,13 +198,23 @@ def main() -> int:
         quality_report=quality_report,
         audio_reports=audio_reports,
     )
+    export_glossary_candidates(output_dir, glossary_candidates)
     export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
     export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
     export_vtt(output_dir / "vtt", cleaned_turns)
 
     print("\nDone.")
-    print(f"Wrote {len(cleaned_turns)} turns, {len(all_words)} words, {len(chunks)} chunks.")
+    print(
+        f"Wrote {len(cleaned_turns)} turns, {len(all_words)} words, "
+        f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates."
+    )
     return 0
+
+
+def resolve_output_dir(output_arg: str | None, manifest_path: Path) -> Path:
+    if output_arg is None:
+        return manifest_path.parent / "output"
+    return Path(output_arg).resolve()
 
 
 if __name__ == "__main__":

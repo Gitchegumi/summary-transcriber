@@ -39,12 +39,14 @@ summary-transcriber/
     │   └── merge.py
     ├── enrich/
     │   ├── glossary.py
+    │   ├── glossary_candidates.py
     │   ├── corrections.py
     │   ├── entities.py
     │   ├── quality.py
     │   └── chunks.py
     └── exports/
         ├── nocodb.py
+        ├── glossary.py
         ├── agents.py
         ├── markdown.py
         ├── vtt.py
@@ -210,6 +212,14 @@ session_manifest.yaml
 
 Use stable `speaker_id` values because they become foreign keys in the exported CSV/JSON records. Use `display_name` for the human-readable speaker name and `character_name` for the D&D character when applicable.
 
+The pipeline can use compatible `.flac` and `.wav` files directly. If a source file is already mono 16 kHz FLAC/WAV, it is passed to the transcription provider without remuxing. If the file has a different sample rate, channel count, or container, the pipeline creates a local mono 16 kHz WAV in `output/prepared_audio/` and uses that prepared file for transcription.
+
+Use `--no-audio-normalize` if you want to force the provider to consume the exact source files from the manifest:
+
+```bash
+python transcribe.py --manifest session_manifest.yaml --no-audio-normalize
+```
+
 ## Session Manifest
 
 ```yaml
@@ -280,26 +290,30 @@ python transcribe.py --manifest session_manifest.yaml --output output
 python transcribe.py --manifest session_manifest.yaml --backend canary --model nvidia/canary-1b-v2
 python transcribe.py --manifest session_manifest.yaml --backend whisperx --model large-v3
 python transcribe.py --manifest session_manifest.yaml --skip-transcription
+python transcribe.py --manifest session_manifest.yaml --no-audio-normalize
 ```
 
 `--skip-transcription` reuses raw provider JSON from `output/raw/<backend>/<speaker_id>.raw.json`, which is helpful while iterating on normalization and exports.
+
+If `--output` is omitted, outputs are written to an `output/` folder beside the manifest file. For example, `python transcribe.py --manifest campaigns/session_12/session_manifest.yaml` writes to `campaigns/session_12/output/`.
 
 ## Pipeline
 
 1. Load `session_manifest.yaml`.
 2. Validate all listed audio files exist.
 3. Inspect audio duration, sample rate, channel count, format, and codec with `ffprobe`.
-4. Normalize audio locally to mono 16 kHz WAV with `ffmpeg`.
+4. Use compatible mono 16 kHz FLAC/WAV directly, or normalize audio locally to mono 16 kHz WAV with `ffmpeg` when needed.
 5. Transcribe each known speaker track independently.
 6. Preserve raw local model output for debugging.
 7. Normalize provider output into canonical word and turn records.
 8. Merge speaker tracks chronologically.
 9. Run conservative glossary and rules-based cleanup without overwriting raw text.
-10. Generate a transcript quality report.
-11. Generate time-based chunks.
-12. Export NocoDB-ready CSV files.
-13. Export agent-ready JSONL and chunk JSON.
-14. Export human-readable Markdown and optional VTT.
+10. Generate glossary candidates for future manifest updates.
+11. Generate a transcript quality report.
+12. Generate time-based chunks.
+13. Export NocoDB-ready CSV files.
+14. Export agent-ready JSONL and chunk JSON.
+15. Export human-readable Markdown and optional VTT.
 
 ## Output
 
@@ -313,6 +327,8 @@ output/
   transcript_corrections.csv
   transcript_chunks.csv
   transcript_quality_report.json
+  glossary_candidates.csv
+  glossary_candidates.json
 
   agents/
     turns.jsonl
@@ -355,6 +371,12 @@ session_id,turn_id,word_id,speaker_id,word,start_seconds,end_seconds,confidence,
 session_id,turn_id,correction_id,original_text,corrected_text,correction_type,reason,confidence
 ```
 
+`glossary_candidates.csv`:
+
+```text
+session_id,candidate_id,term,candidate_type,suggested_glossary_bucket,reason,example_text,speaker_id,turn_id,start_seconds,end_seconds,confidence,occurrence_count
+```
+
 ## Conservative Cleanup
 
 Raw text is always preserved in `text_raw`. `text_cleaned` only applies conservative rule and glossary corrections, such as:
@@ -367,6 +389,12 @@ inside check -> Insight check
 ```
 
 The pipeline does not freely rewrite transcript text with an LLM.
+
+## Glossary Candidates
+
+After each run, review `output/glossary_candidates.csv` or `output/glossary_candidates.json` for possible terms to add to future manifests. These files are suggestions only; the pipeline does not automatically edit `session_manifest.yaml`.
+
+Candidate entries are generated from repeated low-confidence words, unfamiliar capitalized terms, and phrases that triggered conservative correction rules. Use the `suggested_glossary_bucket` value as a starting point, then move terms into the bucket that fits your campaign.
 
 ## Quality Report
 
