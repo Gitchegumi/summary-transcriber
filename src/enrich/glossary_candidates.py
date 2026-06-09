@@ -1,10 +1,34 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import string
 from collections import defaultdict
 
 from src.config.manifest import SessionManifest, GlossaryConfig
+
+
+@dataclass
+class ScoringWeights:
+    """Weights configuration for candidate scoring."""
+    is_correction: int = 5
+    repeated_term: int = 2
+    mid_sentence_cap: int = 3
+    context_clues: int = 2
+    resembles_existing: int = 2
+    multiple_turns: int = 2
+    multiple_speakers: int = 2
+    multi_word: int = 2
+    fantasy_name_shape: int = 2
+    low_confidence: int = 2
+    common_english_word: int = -3
+    filler_word: int = -5
+    profanity: int = -5
+    sentence_start_only: int = -4
+    frequent_table_chatter: int = -3
+    acknowledgement_word: int = -5
+    real_person: int = -5
+    short_utterance: int = -2
 
 STOPWORDS = {
     "all",
@@ -633,6 +657,7 @@ def score_candidate(
     is_correction: bool,
     speaker_names: set[str],
     manifest: SessionManifest,
+    weights: ScoringWeights = ScoringWeights(),
 ) -> tuple[int, list[str], list[str]]:
     score = 0
     positive_signals = []
@@ -641,18 +666,18 @@ def score_candidate(
     term_lower = term.lower()
 
     if is_correction:
-        score += 5
-        positive_signals.append("correction_source_phrase (+5)")
+        score += weights.is_correction
+        positive_signals.append(f"correction_source_phrase (+{weights.is_correction})")
 
     if occurrence_count >= 2:
-        score += 2
-        positive_signals.append(f"repeated_term_occurrences_{occurrence_count} (+2)")
+        score += weights.repeated_term
+        positive_signals.append(f"repeated_term_occurrences_{occurrence_count} (+{weights.repeated_term})")
 
     mid_sentence_cap = occurrence_count - sentence_start_count
     if mid_sentence_cap > 0:
-        score += 3
+        score += weights.mid_sentence_cap
         positive_signals.append(
-            f"mid_sentence_capitalized_count_{mid_sentence_cap} (+3)"
+            f"mid_sentence_capitalized_count_{mid_sentence_cap} (+{weights.mid_sentence_cap})"
         )
 
     found_clues = []
@@ -661,8 +686,8 @@ def score_candidate(
         if clue in context:
             found_clues.append(clue)
     if found_clues:
-        score += 2
-        positive_signals.append(f"near_context_clues_{len(found_clues)} (+2)")
+        score += weights.context_clues
+        positive_signals.append(f"near_context_clues_{len(found_clues)} (+{weights.context_clues})")
 
     known_terms = {t.lower() for t in manifest.glossary.all_terms()}
     resembles = False
@@ -671,63 +696,63 @@ def score_candidate(
             resembles = True
             break
     if resembles:
-        score += 2
-        positive_signals.append("resembles_existing_glossary_term (+2)")
+        score += weights.resembles_existing
+        positive_signals.append(f"resembles_existing_glossary_term (+{weights.resembles_existing})")
 
     if len(turn_ids) > 1:
-        score += 2
-        positive_signals.append(f"appears_in_multiple_turns_{len(turn_ids)} (+2)")
+        score += weights.multiple_turns
+        positive_signals.append(f"appears_in_multiple_turns_{len(turn_ids)} (+{weights.multiple_turns})")
 
     if len(speaker_ids) > 1:
-        score += 2
+        score += weights.multiple_speakers
         positive_signals.append(
-            f"appears_from_multiple_speakers_{len(speaker_ids)} (+2)"
+            f"appears_from_multiple_speakers_{len(speaker_ids)} (+{weights.multiple_speakers})"
         )
 
     if " " in term:
-        score += 2
-        positive_signals.append("multi_word_noun_phrase (+2)")
+        score += weights.multi_word
+        positive_signals.append(f"multi_word_noun_phrase (+{weights.multi_word})")
 
     fantasy_chars = {"z", "x", "q", "v"}
     has_fantasy_char = any(c in term_lower for c in fantasy_chars)
     ends_fantasy = term_lower[-1] in {"x", "z"} if term_lower else False
     if has_fantasy_char or ends_fantasy:
-        score += 2
-        positive_signals.append("unusual_fantasy_name_shape (+2)")
+        score += weights.fantasy_name_shape
+        positive_signals.append(f"unusual_fantasy_name_shape (+{weights.fantasy_name_shape})")
 
     low_conf_count = sum(1 for c in confidence_values if c < 0.75)
     if low_conf_count > 0:
-        score += 2
-        positive_signals.append(f"low_confidence_variants_count_{low_conf_count} (+2)")
+        score += weights.low_confidence
+        positive_signals.append(f"low_confidence_variants_count_{low_conf_count} (+{weights.low_confidence})")
 
     if term_lower in STOPWORDS:
-        score -= 3
-        negative_signals.append("common_english_word (-3)")
+        score += weights.common_english_word
+        negative_signals.append(f"common_english_word ({weights.common_english_word})")
 
     if term_lower in FILLER_WORDS:
-        score -= 5
-        negative_signals.append("filler_word (-5)")
+        score += weights.filler_word
+        negative_signals.append(f"filler_word ({weights.filler_word})")
 
     if term_lower in PROFANITY:
-        score -= 5
-        negative_signals.append("profanity (-5)")
+        score += weights.profanity
+        negative_signals.append(f"profanity ({weights.profanity})")
 
     if sentence_start_count == occurrence_count and occurrence_count > 0:
-        score -= 4
-        negative_signals.append("only_appears_at_sentence_starts (-4)")
+        score += weights.sentence_start_only
+        negative_signals.append(f"only_appears_at_sentence_starts ({weights.sentence_start_only})")
 
     if occurrence_count > 10 and not found_clues:
-        score -= 3
-        negative_signals.append("frequent_table_chatter (-3)")
+        score += weights.frequent_table_chatter
+        negative_signals.append(f"frequent_table_chatter ({weights.frequent_table_chatter})")
 
     acknowledgements = {"yeah", "yep", "yes", "okay", "alright", "sure", "nope"}
     if term_lower in acknowledgements:
-        score -= 5
-        negative_signals.append("acknowledgement_word (-5)")
+        score += weights.acknowledgement_word
+        negative_signals.append(f"acknowledgement_word ({weights.acknowledgement_word})")
 
     if term_lower in speaker_names or term_lower in REAL_PEOPLE:
-        score -= 5
-        negative_signals.append("real_person_or_table_participant_name (-5)")
+        score += weights.real_person
+        negative_signals.append(f"real_person_or_table_participant_name ({weights.real_person})")
 
     short_utterance = False
     for txt in example_texts:
@@ -735,8 +760,8 @@ def score_candidate(
             short_utterance = True
             break
     if short_utterance:
-        score -= 2
-        negative_signals.append("appears_in_short_utterances (-2)")
+        score += weights.short_utterance
+        negative_signals.append(f"appears_in_short_utterances ({weights.short_utterance})")
 
     return score, positive_signals, negative_signals
 

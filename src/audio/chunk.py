@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ def chunk_speaker_audio(
     progress_reporter: Any = None,
 ) -> list[dict[str, Any]]:
     """Chunks a speaker track and returns a list of chunk metadata dicts."""
+    manifest.validate_audio_files()
     chunks_dir = output_dir / "chunks"
     speaker_chunks_dir = chunks_dir / speaker.speaker_id
     speaker_chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -158,10 +160,24 @@ def chunk_speaker_audio(
             command.extend(["-c:a", "flac"])
         command.append(str(chunk_file_path))
 
-        try:
-            subprocess.run(command, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"ffmpeg chunking failed for {source_path}: {exc.stderr}")
+        max_retries = 3
+        backoff_seconds = 1.0
+        success = False
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                subprocess.run(command, check=True, capture_output=True, text=True)
+                success = True
+                break
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    time.sleep(backoff_seconds * attempt)
+                else:
+                    break
+        if not success:
+            err_msg = last_error.stderr if last_error else "unknown error"
+            raise RuntimeError(f"ffmpeg chunking failed for {source_path} after {max_retries} attempts: {err_msg}")
 
         if progress_reporter:
             progress_reporter.complete_chunk_prep(

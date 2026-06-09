@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-"""Local-first D&D session transcription pipeline."""
+"""Local-first D&D session transcription pipeline (v2 CLI Entrypoint).
+
+This script serves as the main command-line interface and orchestrator for the 
+v2 local-first transcription pipeline. It coordinates configuration parsing, 
+audio preprocessing, model transcription (ASR), transcript normalization, 
+glossary enrichment, quality reporting, and exporting structured agent datasets 
+and human-readable transcripts.
+"""
 
 from __future__ import annotations
 

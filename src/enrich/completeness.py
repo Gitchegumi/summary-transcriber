@@ -11,7 +11,7 @@ def compute_completeness_report(
     manifest: SessionManifest,
     turns: list[dict],
     audio_reports: dict,
-    speaker_raw_outputs: dict | None = None
+    speaker_raw_outputs: dict,
 ) -> dict:
     speaker_reports = {}
     total_missing_seconds = 0.0

@@ -100,6 +100,7 @@ class GlossaryCandidateFiltersConfig:
 @dataclass
 class DeduplicationConfig:
     enabled: bool = False
+    audit_only: bool = False
 
 
 @dataclass
@@ -131,7 +132,12 @@ class SessionManifest:
         path = Path(value)
         if not path.is_absolute():
             path = self.root / path
-        return path.resolve()
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.root.resolve())
+        except ValueError:
+            raise ValueError(f"Path traversal detected: path '{value}' resolves outside manifest root '{self.root}'")
+        return resolved
 
     def apply_overrides(
         self,
@@ -193,12 +199,17 @@ def load_manifest(path: Path) -> SessionManifest:
 
     # Resolve paths for glossary sources
     resolved_sources = []
-    manifest_root = path.parent
+    manifest_root = path.parent.resolve()
     for src in glossary_sources:
         src_path = Path(src)
         if not src_path.is_absolute():
             src_path = manifest_root / src_path
-        resolved_sources.append(src_path.resolve())
+        resolved = src_path.resolve()
+        try:
+            resolved.relative_to(manifest_root)
+        except ValueError:
+            raise ValueError(f"Path traversal detected in glossary source: {src}")
+        resolved_sources.append(resolved)
 
     # Build consolidated glossary entries
     entries: dict[str, list[GlossaryEntry]] = {}
@@ -260,7 +271,8 @@ def load_manifest(path: Path) -> SessionManifest:
 
     deduplication_data = data.get("deduplication") or {}
     deduplication_config = DeduplicationConfig(
-        enabled=bool(deduplication_data.get("enabled", False))
+        enabled=bool(deduplication_data.get("enabled", False)),
+        audit_only=bool(deduplication_data.get("audit_only", False)),
     )
 
     completeness_data = data.get("completeness") or {}

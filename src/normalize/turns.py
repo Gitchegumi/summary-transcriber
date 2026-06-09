@@ -117,11 +117,27 @@ def normalize_turns(
             turns_curr = turns_by_chunk[cid_curr]
             turns_next = turns_by_chunk[cid_next]
             
-            for t_curr in turns_curr:
+            if not turns_curr or not turns_next:
+                continue
+                
+            # Interval overlap pre-filtering:
+            # Current chunk turns only overlap with next chunk turns in the boundary region.
+            # We can find the overlap time interval: [next_chunk_start, curr_chunk_end]
+            overlap_min_start = turns_next[0]["_chunk_start"]
+            overlap_max_end = turns_curr[0]["_chunk_end"]
+            
+            candidate_curr = [t for t in turns_curr if t["end_seconds"] > overlap_min_start]
+            candidate_next = [t for t in turns_next if t["start_seconds"] < overlap_max_end]
+            
+            for t_curr in candidate_curr:
                 if t_curr["turn_id"] in discarded_ids:
                     continue
-                for t_next in turns_next:
+                for t_next in candidate_next:
                     if t_next["turn_id"] in discarded_ids:
+                        continue
+                        
+                    # Pre-filter non-overlapping intervals
+                    if t_curr["start_seconds"] >= t_next["end_seconds"] or t_curr["end_seconds"] <= t_next["start_seconds"]:
                         continue
                         
                     # Calculate time overlap
@@ -170,7 +186,9 @@ def normalize_turns(
                             discarded = t_curr
                             kept = t_next
                             
-                        discarded_ids.add(discarded["turn_id"])
+                        # If audit_only is enabled, we record the decision but do not actually discard the turn.
+                        if not manifest.deduplication.audit_only:
+                            discarded_ids.add(discarded["turn_id"])
                         DISCARDED_TURNS.append(discarded)
                         
                         # Record the decision
@@ -184,7 +202,7 @@ def normalize_turns(
                         }
                         DEDUPLICATION_DECISIONS.append(decision)
                         
-                        if not prefer_curr:
+                        if not prefer_curr and not manifest.deduplication.audit_only:
                             break
                             
     # Filter and re-sequence final turns
