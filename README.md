@@ -1,178 +1,241 @@
-# Summary Transcriber
+# Summary Transcriber v2
 
-Transcribe multiple speaker audio tracks with OpenAI Whisper, interactively label speakers, merge every line into a single chronologically ordered transcript, and generate agent-ready files for creating a session summary.
+Local-first, completeness-priority transcription pipeline for long-form separate speaker audio tracks (e.g., D&D session audio recorded via Craig). 
 
-## Background
+The pipeline prioritizes **complete transcript retention** over aggressive cleanup, ensuring no character monologues, rules calls, or DM narrations are lost.
 
-This tool was developed to help with a Dungeons & Dragons campaign. The group consists of working adults with families, which means there can be long breaks between sessions. To help everyone get back up to speed, this script transcribes game sessions and produces source material for a "read-ahead" recap before the next session.
+---
 
-The audio is captured using the [craig.chat](https://craig.chat/) bot for Discord, but Craig is beyond the scope of this project. You can use any audio recording software that produces separate audio tracks for each speaker.
+## Key Features
 
-## Features
+1. **Completeness-First Philosophy**: Overlap deduplication is disabled by default. If enabled, any discarded duplicate text is saved to an audit file (`deduplication_audit.jsonl`).
+2. **Local-Only Transcription**: Supporting `faster-whisper`, `whisperx`, `parakeet`, and `canary` without external APIs.
+3. **Structured Agent Outputs**: Generates a set of canonical JSON/JSONL outputs designed for consumption by downstream Recap or Summary AI agents.
+4. **Human-Readable Transcript**: Generates a cleaned, filler-reduced Markdown transcript at `output/transcript.md`.
+5. **Coverage Validation**: Automatically computes session coverage per speaker and flags missing ranges or failed chunks in `output/transcript_completeness_report.json`.
 
-- Interactive folder prompt and model selection (Whisper sizes: tiny, base, small, medium, large, turbo)
-- Per-speaker track handling: record each participant separately, then label before transcription
-- Merges all `.vtt` files into one unified, time-sorted CSV with start and end timestamps
-- Deduplicates consecutive identical lines from the same speaker file
-- Optional chunking of the merged CSV into fixed-duration segments (default 30-minute slices)
-- Agent-ready exports: JSONL transcript, summary input brief, and Markdown transcript chunks
-- Friendly error handling for missing Whisper CLI, missing audio files, and naming collisions
+---
 
-## Workflow Overview
-
-1. Supply a directory containing one audio file per speaker (`.flac`, `.mp3`, `.wav`, `.m4a`, `.ogg`).
-2. The script creates `transcript/` and `merged/` inside that directory as needed.
-3. You assign a human-readable speaker name for each audio track before transcription starts.
-4. Each audio file is transcribed with the chosen Whisper model; the resulting `.vtt` is moved into `merged/` using the speaker name you chose.
-5. The renamed VTTs are parsed and merged into `merged/session_transcript.csv`.
-6. The merged CSV is split into `merged/chunked/chunk_#.csv` files.
-7. Agent-oriented files are written to `merged/agent/` for summary generation.
-
-## Requirements
-
-| Component | Purpose |
-| --- | --- |
-| Python 3.8+ | Run the orchestration script |
-| FFmpeg | Required by Whisper for audio decoding |
-| Whisper CLI (`openai-whisper`) | Performs transcription |
-| Optional CUDA GPU + PyTorch | Performance boost for larger models |
-
-Installable Python dependency tracked in `requirements.txt`:
+## Repository Layout
 
 ```text
-openai-whisper
+summary-transcriber/
+├── transcribe.py
+└── src/
+    ├── config/
+    │   └── manifest.py
+    ├── audio/
+    │   ├── inspect.py
+    │   ├── prepare.py
+    │   └── chunk.py
+    ├── providers/
+    │   ├── base.py
+    │   ├── parakeet.py
+    │   ├── canary.py
+    │   └── whisperx.py
+    ├── normalize/
+    │   ├── turns.py
+    │   ├── words.py
+    │   └── merge.py
+    ├── enrich/
+    │   ├── cleanup.py       # Conservative filler word remover
+    │   ├── completeness.py  # Transcript coverage validator
+    │   ├── glossary_candidates.py
+    │   ├── corrections.py
+    │   ├── entities.py
+    │   ├── quality.py
+    │   └── chunks.py
+    └── exports/
+        ├── agents.py        # Required agent outputs
+        ├── markdown.py      # Human-friendly markdown exports
+        ├── vtt.py
+        └── raw.py
 ```
 
-## Quick Start
+---
+
+## Installation
+
+Create a virtual environment and install dependencies:
 
 ```bash
-git clone https://github.com/Gitchegumi/summary-transcriber.git
-cd summary-transcriber
 python -m venv .venv
-source .venv/bin/activate  # Windows: .\.venv\Scripts\Activate.ps1
+# Windows
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
 pip install -r requirements.txt
-# Ensure ffmpeg is installed and in PATH
-python transcribe.py
 ```
 
-When prompted:
+Ensure `ffmpeg` and `ffprobe` are installed and available on your system `PATH`.
 
-- Enter the absolute or relative path to your audio folder.
-- Choose a model size, or press Enter for default `turbo`.
-- Provide friendly speaker names for each audio track before transcription begins.
+---
 
-## Model Selection Notes
+## Supported Local Backends
 
-| Model | Speed | Accuracy | Typical Use |
-| --- | --- | --- | --- |
-| tiny | Fastest | Lowest | Quick skim or draft |
-| base | Fast | Low-mid | Casual notes |
-| small | Medium | Medium | General session recaps |
-| medium | Slower | High | More accurate logs |
-| large | Slowest | Highest | Best quality, longest sessions |
-| turbo | Fast optimized | High | Balanced default |
+Models are fetched and cached locally by the backend the first time they are loaded.
 
-Larger models are slower and require more VRAM; a GPU is highly recommended above `small`.
+### 1. default: `faster-whisper`
+Recommended default backend. Stable and highly reliable.
 
-## Installing Prerequisites
+### 2. optional: `whisperx`
+Provides optional Whisper-family transcription.
 
-### FFmpeg
+### 3. optional: `parakeet` (`nvidia/parakeet-tdt-0.6b-v3`)
+Preferred NVIDIA comparison backend. Requires GPU/CUDA and NVIDIA NeMo libraries.
 
-- Windows with Chocolatey: `choco install ffmpeg`
-- macOS with Homebrew: `brew install ffmpeg`
-- Debian/Ubuntu: `sudo apt update && sudo apt install ffmpeg`
+### 4. optional: `canary` (`nvidia/canary-1b-v2`)
+Optional NVIDIA comparison backend.
 
-### Whisper CLI
+For PyTorch CUDA & NeMo installations (required for Parakeet/Canary), refer to the GPU Setup guidelines.
 
+---
+
+## Manifest Configuration
+
+The pipeline is driven by a `session_manifest.yaml` file that specifies metadata, backend configurations, speaker tracks, and glossary files:
+
+```yaml
+session:
+  id: "james-session-9"
+  campaign: "James Campaign"
+  session_number: 9
+  session_date: "2026-06-08"
+  source: "craig"
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_seconds: 60
+  overlap_seconds: 2
+  min_chunk_seconds: 15
+  chunk_format: "wav"
+
+transcription:
+  backend: "faster-whisper"
+  model: "large-v3"
+  device: "cuda"
+
+progress:
+  enabled: true
+  update_interval_seconds: 5
+
+speakers:
+  - speaker_id: "dm"
+    display_name: "James"
+    role: "DM"
+    character_name: null
+    file: "audio/dm.flac"
+  - speaker_id: "kibiw"
+    display_name: "Player 1"
+    role: "Player"
+    character_name: "Kibiw"
+    file: "audio/player_1.flac"
+
+glossary_sources:
+  - "glossary.yaml"
+
+# Optional pipeline behaviors:
+deduplication:
+  enabled: false             # Disable destructive overlap deduplication (default)
+
+completeness:
+  max_missing_seconds_warn: 30.0   # Warn if missing coverage exceeds 30s
+  fail_on_missing_coverage: false  # Exit with code 1 if missing coverage exceeds threshold
+```
+
+---
+
+## Glossary Setup
+
+Create a `glossary.yaml` to specify correct spellings, aliases, and metadata for D&D proper nouns:
+
+```yaml
+glossary:
+  pcs:
+    - canonical: "Kibiw"
+      type: "pc"
+      aliases:
+        - "Kibew"
+        - "Kibu"
+  npcs:
+    - canonical: "Lady Saris"
+      type: "npc"
+      description: "Local ruling noble."
+```
+
+---
+
+## Chunking Behaviors
+
+### 1. NeMo Audio Chunking
+NVIDIA NeMo models (Parakeet/Canary) cannot ingest hours of raw audio without out-of-memory errors. The pipeline automatically splits long speaker tracks into **short audio chunks** (default: 60 seconds with 2 seconds overlap) before transcribing.
+*Whisper-based backends bypass this audio splitting step entirely.*
+
+### 2. Agent Transcript Chunking
+After chronological merging, the pipeline groups final turns into approximately **30-minute transcript chunks**.
+- Chunk boundaries are time-based but **never split a turn** (turns are assigned to a chunk using their start timestamp).
+- Per-chunk files are derived views over the canonical turns, not independently transcribed or separately cleaned.
+
+---
+
+## Pipeline Modes
+
+### 1. Draft Mode
 ```bash
-pip install openai-whisper
+python transcribe.py --manifest session_manifest.yaml --mode draft
 ```
+Runs the audio downmixing, chunking, and local model transcription (ASR). Resolves turns chronologically, builds proper noun candidate lists, and writes initial draft records under `output/draft/`.
 
-If you need GPU acceleration, install PyTorch first using the selector at the [official PyTorch site](https://pytorch.org/get-started/locally/), then install Whisper.
-
-## Output Structure
-
-After a run, your audio directory will contain:
-
-```text
-transcript/
-    # temporary Whisper output folder; VTTs are moved after each track finishes
-merged/
-    Alice.vtt
-    Bob.vtt
-    session_transcript.csv
-    chunked/
-        chunk_1.csv
-        chunk_2.csv
-        ...
-    agent/
-        session_summary_input.md
-        session_transcript.jsonl
-        chunks/
-            chunk_001.md
-            chunk_002.md
-            ...
+### 2. Finalize Mode
+```bash
+python transcribe.py --manifest session_manifest.yaml --mode finalize
 ```
+Loads draft outputs, applies glossary corrections, extracts entities, and writes final agent outputs and human-readable Markdown transcripts. **Does not require a GPU** and runs in seconds.
 
-`session_transcript.csv` columns:
+---
 
-```text
-Start,End,Speaker,Text
-00:00:12.345,00:00:14.000,Alice,Hello everyone...
-00:00:14.101,00:00:15.200,Bob,Hi!
-```
+## Required Outputs
 
-## Agent Summary Output
+After running `--mode finalize`, the output directory includes:
 
-The `merged/agent/` folder is designed for use by an AI agent that needs to create a session summary without re-parsing CSV:
+### Top-Level Exports
 
-- `session_summary_input.md` contains summary instructions, session metadata, speaker activity, and a chunk index.
-- `session_transcript.jsonl` stores one chronological transcript turn per line with `index`, `start`, `end`, `speaker`, and `text`.
-- `chunks/chunk_###.md` stores time-bounded transcript slices with speaker and timestamp labels.
+#### `output/transcript.md`
+Human-readable, chronological session transcript.
+- Uses HH:MM:SS timestamps and speaker labels (e.g. `[00:01:16 - 00:01:34] Eldrin / Player:`).
+- Displays cleaned text with conservative filler-words removed.
+- *Removes pure fillers (um, uh, ah, er, hmm, mm-hmm, you know) and accidental double starts (I I, I'm I'm) without summarizing, paraphrasing, or altering dialogue meaning.*
 
-Recommended summary workflow:
+#### `output/transcript_completeness_report.json`
+Details of session-wide transcription coverage.
+- Lists covered ranges, missing ranges, expected/successful/failed/empty chunk counts per speaker, and total missing seconds.
 
-1. Give the agent `session_summary_input.md`.
-2. Have it process each `chunks/chunk_###.md` in order and produce brief chunk notes.
-3. Ask it to combine chunk notes into a final recap with sections for major events, decisions, NPCs/locations/items, unresolved hooks, and next-session reminders.
+---
 
-## Current Transcription Backend Options
+### Agent Structured Exports (`output/agents/`)
 
-The script currently uses local `openai-whisper`, which is still a good no-API-key baseline when you already have separate speaker tracks from Craig. Recent tools worth considering:
+#### `output/agents/turns.jsonl`
+The canonical chronological transcript. One JSON object per turn containing:
+- Authoritative session, speaker, and character metadata.
+- Timestamps and source audio metrics.
+- `text.raw`: the untouched original output.
+- `text.cleaned`: glossary corrected text.
+- `text.markdown_cleaned`: filler-reduced text.
 
-| Option | Why consider it | Tradeoff |
-| --- | --- | --- |
-| OpenAI `gpt-4o-transcribe` / `gpt-4o-mini-transcribe` | Newer API speech-to-text models with better accuracy than classic Whisper in OpenAI's published benchmarks | Cloud API cost; separate-speaker local workflow would need an API integration |
-| OpenAI `gpt-4o-transcribe-diarize` | Built-in diarization for mixed-speaker audio | API-only; model availability and diarization behavior should be tested on campaign audio |
-| Deepgram Nova-3 + `diarize_model=latest` | Strong managed batch transcription, custom terminology/keyterm support, and a newer diarization v2 option | Cloud API; best fit if you want automatic diarization or vocabulary prompting |
-| ElevenLabs Scribe / Scribe v2 | Structured JSON, speaker diarization, word timestamps, and non-speech event markers | Cloud API; verify long-session limits and diarization quality on your recordings |
-| Soniox v4 Async | Long-form multilingual transcription with improved speaker separation and normalization | Cloud API; less familiar ecosystem than Whisper |
-| WhisperX | Local/open-source path for faster Whisper, word timestamps, VAD, and diarization via pyannote | More setup complexity, possible Hugging Face token/model access, GPU recommended |
-| Groq Whisper Large v3 Turbo | Very fast hosted Whisper inference at low per-hour pricing | No native diarization; best as a speed upgrade rather than an output-structure upgrade |
+#### `output/agents/session.json`
+Overall session and transcription metadata, including campaign details, model details, outputs manifest, and completeness reports (failed chunks and missing coverage ranges).
 
-For this specific tool, the most practical upgrade path is:
+#### `output/agents/transcript_entities.jsonl`
+One JSON object per glossary-backed entity found in the transcript, listing its description, type, first seen timestamp/turn, and a list of evidence turn IDs.
 
-1. Keep local Whisper CLI as the default backend.
-2. Add optional provider backends later (`openai`, `deepgram`, `elevenlabs`, `soniox`, `groq`, `whisperx`) behind the same merged transcript schema.
-3. Add a campaign glossary/custom vocabulary prompt where providers support it, because D&D names and fantasy terms are often the biggest transcription failure point.
-4. Preserve the agent output format regardless of backend, so the summarization step stays stable.
+#### `output/agents/chunks.jsonl`
+Index of 30-minute transcript chunk files.
 
-## Troubleshooting
+#### `output/agents/chunks/chunk_001.jsonl`, `chunk_002.jsonl`, ...
+Convenience JSONL files containing turns for each specific 30-minute transcript window.Deterministic views regenerated from `turns.jsonl`.
 
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| `Error: 'whisper' command not found.` | Whisper CLI not installed or wrong venv | Activate venv, then `pip install -r requirements.txt` |
-| `No audio files found` | Wrong folder path or unsupported extensions | Check path; ensure files end in supported extensions |
-| Very slow transcription | Using large model on CPU | Switch to a smaller model or install CUDA + correct PyTorch build |
-| GPU not used | PyTorch CPU-only build installed | Reinstall PyTorch with CUDA per PyTorch guidance |
-| VTT rename collision | Same speaker name chosen twice | Provide unique names when prompted |
-
-## Roadmap / Ideas
-
-- Optional API backends for OpenAI, Deepgram, ElevenLabs, Soniox, Groq, and WhisperX
-- Campaign glossary / vocabulary prompting
-- Automated chunk-level summary drafts
-- Final Markdown session recap export
+---
 
 ## License
 

@@ -1,530 +1,640 @@
 #!/usr/bin/env python
+"""Local-first D&D session transcription pipeline (v2 CLI Entrypoint).
+
+This script serves as the main command-line interface and orchestrator for the 
+v2 local-first transcription pipeline. It coordinates configuration parsing, 
+audio preprocessing, model transcription (ASR), transcript normalization, 
+glossary enrichment, quality reporting, and exporting structured agent datasets 
+and human-readable transcripts.
 """
-Audio transcription tool with speaker diarization and summarization capabilities.
-"""
-import re
-import sys
-import csv
+
+from __future__ import annotations
+
+import argparse
 import json
-import subprocess
-import shutil
-from collections import defaultdict
+import sys
+
+# Check for verbose flag early to configure quiet backend logging before anything else
+_early_verbose = "--verbose" in sys.argv
+from src.runtime.output import configure_quiet_backend_logging
+configure_quiet_backend_logging(verbose=_early_verbose)
+
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# --- Functions from merge_vtt.py ---
+from src.audio.inspect import inspect_audio
+from src.audio.prepare import needs_mono_downmix, prepare_audio, prepare_mono_flac
+from src.audio.chunk import chunk_speaker_audio
+from src.config.manifest import load_manifest
+from src.enrich.chunks import build_chunks
+from src.enrich.corrections import apply_corrections
+from src.enrich.entities import extract_entities
+from src.enrich.glossary_candidates import build_glossary_candidates
+from src.enrich.quality import build_quality_report
+from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
+from src.exports.agents import export_agents
+from src.exports.glossary import export_glossary_candidates, export_draft_outputs, export_noise_report
+from src.exports.nocodb import export_nocodb
+from src.exports.raw import export_raw
+from src.exports.vtt import export_vtt
+from src.normalize.merge import merge_turns
+from src.normalize.turns import normalize_turns
+from src.normalize.words import normalize_words
+from src.providers.base import ProviderContext
+from src.runtime.output import configure_quiet_backend_logging
+from src.providers.canary import CanaryProvider
+from src.providers.parakeet import ParakeetProvider
+from src.providers.whisperx import WhisperXProvider
 
 
-def parse_vtt(file_path):
-    """
-    Parse a VTT file into a list of tuples: (start_time, end_time, speaker, text).
-    """
-    speaker = Path(file_path).stem
-    entries = []
-
-    with open(file_path, encoding="utf-8") as f:
-        lines = f.readlines()
-
-    i = 0
-    prev_text = None
-    while i < len(lines):
-        line = lines[i].strip()
-        if re.match(r"^(\d{2}:)?\d{2}:\d{2}\.\d{3}\s+-->", line):
-            start_time, end_time = [
-                part.strip().split()[0] for part in line.split(" --> ", 1)
-            ]
-            i += 1
-            text_lines = []
-            while i < len(lines) and lines[i].strip():
-                text_lines.append(lines[i].strip())
-                i += 1
-            text = " ".join(text_lines)
-            # De-duplicate consecutive same-text lines in this file
-            if text != prev_text:
-                entries.append(
-                    (
-                        pad_time_string(start_time),
-                        pad_time_string(end_time),
-                        speaker,
-                        text,
-                    )
-                )
-                prev_text = text
-        i += 1
-
-    return entries
+PROVIDERS = {
+    "parakeet": ParakeetProvider,
+    "canary": CanaryProvider,
+    "whisperx": WhisperXProvider,
+    "faster-whisper": WhisperXProvider,
+}
 
 
-def pad_time_string(t):
-    """
-    Ensure time strings are in hh:mm:ss.mmm format by adding hours if missing.
-    """
-    if re.match(r"^\d{2}:\d{2}\.\d{3}$", t):
-        return f"00:{t}"
-    return t
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Transcribe separate local speaker tracks into structured v2 outputs."
+    )
+    parser.add_argument(
+        "--manifest",
+        default="session_manifest.yaml",
+        help="Path to session_manifest.yaml.",
+    )
+    parser.add_argument(
+        "--output",
+        help=(
+            "Output directory for canonical CSV/JSON, agent, Markdown, VTT, and raw "
+            "files. Defaults to an output/ folder next to the manifest."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["draft", "finalize"],
+        default="draft",
+        help="Pipeline workflow mode: draft (transcribe and check glossary candidates) or finalize (apply corrections and export).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=sorted(PROVIDERS),
+        help="Override transcription.backend from the manifest.",
+    )
+    parser.add_argument("--model", help="Override transcription.model from the manifest.")
+    parser.add_argument("--device", help="Override transcription.device from the manifest.")
+    parser.add_argument(
+        "--skip-transcription",
+        action="store_true",
+        help="Load provider raw JSON from output/raw instead of running local ASR.",
+    )
+    parser.add_argument(
+        "--chunk-minutes",
+        type=float,
+        default=30.0,
+        help="Time-based transcript chunk size.",
+    )
+    parser.add_argument(
+        "--normalize-audio",
+        action="store_true",
+        help="Prepare mono 16 kHz WAV files before transcription instead of using direct or mono-FLAC input.",
+    )
+    parser.add_argument(
+        "--force-chunks",
+        action="store_true",
+        help="Force re-chunking of audio files even if they are unchanged.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume transcription, skipping chunks that have already been successfully transcribed.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress reporting readout.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose mode, showing full log outputs from ASR backends.",
+    )
+    parser.add_argument(
+        "--deduplicate",
+        action="store_true",
+        help="Enable boundary overlap deduplication (default: False).",
+    )
+    return parser.parse_args()
 
 
-def time_to_seconds(t):
-    """
-    Convert hh:mm:ss.mmm to seconds (float).
-    """
-    t = pad_time_string(t)
-    h, m, s = t.split(":")
-    s, ms = s.split(".")
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+def get_provider(context: ProviderContext):
+    provider_type = PROVIDERS.get(context.backend)
+    if provider_type is None:
+        supported = ", ".join(sorted(PROVIDERS))
+        raise ValueError(f"Unsupported backend '{context.backend}'. Supported: {supported}")
+    return provider_type(context)
 
 
-def merge_transcripts(vtt_folder, output_file="merged.csv"):
-    """
-    Merges all .vtt files in a folder into a single sorted CSV file.
-    """
-    folder = Path(vtt_folder)
-    if not folder.is_dir():
-        print(f"Error: {vtt_folder} is not a directory.")
-        return
-
-    all_entries = []
-
-    for vtt_file in folder.glob("*.vtt"):
-        entries = parse_vtt(vtt_file)
-        all_entries.extend(entries)
-        print(f"Parsed {len(entries)} lines from {vtt_file.name}")
-
-    # Sort everything by numeric start time
-    sorted_entries = sorted(all_entries, key=lambda x: time_to_seconds(x[0]))
-
-    # Write to CSV
-    output_path = folder / output_file
-    with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Start", "End", "Speaker", "Text"])
-        writer.writerows(sorted_entries)
-
-    print(f"Merged {len(sorted_entries)} total lines into {output_path}")
-    return output_path
-
-
-# --- New function for renaming files ---
-
-
-def rename_vtt_files(audio_files, dest_dir):
-    """
-    Ask the user for speaker names before transcription starts.
-    """
-    print("\n--- Name Speaker Tracks ---")
-    print("Enter a speaker name for each audio track.")
-    print("Press Enter to use the audio filename as the speaker name.")
-
-    speaker_names = {}
-    planned_outputs = set()
-
-    for audio_file in audio_files:
-        original_name = audio_file.stem
-        while True:
-            new_speaker_name = input(f"  Speaker for '{audio_file.name}': ").strip()
-            if not new_speaker_name:
-                new_speaker_name = original_name
-                print(f"    Using original name: {original_name}")
-
-            new_file_path = dest_dir / f"{new_speaker_name}.vtt"
-
-            if new_file_path in planned_outputs:
-                print(
-                    f"    Error: '{new_file_path.name}' is already planned for "
-                    "another track. Please choose a different name."
-                )
-                continue
-
-            if new_file_path.exists():
-                print(
-                    f"    Error: A file named '{new_file_path.name}' already "
-                    f"exists in '{dest_dir}'. Please choose a different name."
-                )
-                continue
-
-            speaker_names[audio_file] = new_speaker_name
-            planned_outputs.add(new_file_path)
-            break
-
-    return speaker_names
-
-
-def move_transcribed_vtt(audio_file, transcript_dir, merged_dir, speaker_name):
-    """
-    Move a transcribed VTT file into the merged folder with its speaker name.
-    """
-    source_path = transcript_dir / f"{audio_file.stem}.vtt"
-    dest_path = merged_dir / f"{speaker_name}.vtt"
-
-    if not source_path.exists():
-        print(f"Warning: Expected VTT was not found: {source_path}")
-        return
-
-    try:
-        shutil.move(str(source_path), str(dest_path))
-        print(f"Saved speaker transcript to: {dest_path}")
-        return dest_path
-    except OSError as e:
-        print(f"Error moving transcript for {audio_file.name}: {e}")
-        return None
-
-
-# --- Main transcription logic ---
-
-
-def main():
-    """
-    Main function to transcribe audio files and merge the VTT outputs.
-    """
-    try:
-        # 1. Get the input directory from the user
-        input_dir_str = input("Enter the full path to your audio folder: ")
-        input_dir = Path(input_dir_str).resolve()
-
-        if not input_dir.is_dir():
-            print(f"Error: The folder '{input_dir}' does not exist.")
-            sys.exit(1)
-
-        # 2. Create output directories
-        transcript_dir = input_dir / "transcript"
-        merged_dir = input_dir / "merged"
-        transcript_dir.mkdir(parents=True, exist_ok=True)
-        merged_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Transcript files will be saved to: {transcript_dir}")
-        print(f"Merged output will be saved to: {merged_dir}")
-
-        # 3. Get model size from user
-        model_sizes = ["tiny", "base", "small", "medium", "large", "turbo"]
-        model_prompt = (
-            f"Please choose a model size ({', '.join(model_sizes)}). "
-            f"Press Enter for default (turbo): "
+def load_raw_output(raw_dir: Path, backend: str, speaker_id: str) -> dict:
+    path = raw_dir / backend / f"{speaker_id}.raw.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing raw output for --skip-transcription: {path}"
         )
-        selected_model = input(model_prompt).strip().lower()
-        if not selected_model or selected_model not in model_sizes:
-            selected_model = "turbo"
-        print(f"Using model size: {selected_model}")
-
-        # 4. Find all audio files in the directory
-        audio_extensions = [".flac", ".mp3", ".wav", ".m4a", ".ogg"]
-        audio_files = []
-        for ext in audio_extensions:
-            audio_files.extend(input_dir.glob(f"*{ext}"))
-        audio_files = sorted(audio_files)
-
-        if not audio_files:
-            print(f"No audio files found in '{input_dir}'.")
-            sys.exit(1)
-
-        print(f"Found {len(audio_files)} audio files to transcribe:")
-        for f in audio_files:
-            print(f"  - {f.name}")
-
-        # 5. Collect speaker names before the long transcription step.
-        speaker_names = rename_vtt_files(audio_files, merged_dir)
-
-        # 6. Loop over tracks and transcribe
-        for audio_file in audio_files:
-            print(f"\nStarting transcription for: {audio_file.name}")
-
-            try:
-                subprocess.run(
-                    [
-                        "whisper",
-                        str(audio_file),
-                        "--model",
-                        selected_model,
-                        "--device",
-                        "cuda",
-                        "--language",
-                        "English",
-                        "--output_format",
-                        "vtt",
-                        "--output_dir",
-                        str(transcript_dir),
-                    ],
-                    check=True,
-                )
-
-                print(f"Finished transcription for: {audio_file.name}")
-                move_transcribed_vtt(
-                    audio_file,
-                    transcript_dir,
-                    merged_dir,
-                    speaker_names[audio_file],
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"Error during transcription for {audio_file.name}: {e}")
-            except FileNotFoundError:
-                print("Error: 'whisper' command not found.")
-                print(
-                    "Please ensure the Whisper CLI is installed and in your system's PATH."
-                )
-                sys.exit(1)
-
-        print("\nAll requested tracks processed.")
-
-        # 7. Merge the generated VTT files
-        print("\nNow merging transcript files...")
-        merged_csv_path = merged_dir / "session_transcript.csv"
-        merge_transcripts(merged_dir, output_file=merged_csv_path.name)
-
-        # 8. Chunk the merged CSV
-        chunk_merged_csv(merged_csv_path)
-
-        # 9. Write agent-oriented transcript artifacts
-        write_agent_outputs(merged_csv_path)
-
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-        sys.exit(0)
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def seconds_to_time(s):
-    """
-    Convert seconds (float) to hh:mm:ss.mmm format.
-    """
-    h = int(s // 3600)
-    s %= 3600
-    m = int(s // 60)
-    s %= 60
-    sec = int(s)
-    ms = int((s - sec) * 1000)
-    return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
-
-
-def format_duration(total_seconds):
-    """
-    Convert seconds to a compact human-readable duration.
-    """
-    total_seconds = int(total_seconds)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    if hours:
-        return f"{hours}h {minutes}m {seconds}s"
-    if minutes:
-        return f"{minutes}m {seconds}s"
-    return f"{seconds}s"
-
-
-def read_merged_entries(merged_file):
-    """
-    Read the merged transcript CSV into dictionaries for downstream exports.
-    """
-    entries = []
-    with open(merged_file, "r", encoding="utf-8", newline="") as f:
+def load_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing draft file: {path}")
+    import csv
+    with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            entries.append(
-                {
-                    "start": row["Start"],
-                    "end": row["End"],
-                    "speaker": row["Speaker"],
-                    "text": row["Text"],
-                    "start_seconds": time_to_seconds(row["Start"]),
-                    "end_seconds": time_to_seconds(row["End"]),
-                }
-            )
-    return entries
+        rows = list(reader)
+        
+        # Coerce types for fields
+        for row in rows:
+            if "start_seconds" in row:
+                row["start_seconds"] = float(row["start_seconds"]) if row["start_seconds"] != "" else 0.0
+            if "end_seconds" in row:
+                row["end_seconds"] = float(row["end_seconds"]) if row["end_seconds"] != "" else 0.0
+            if "duration_seconds" in row:
+                row["duration_seconds"] = float(row["duration_seconds"]) if row["duration_seconds"] != "" else 0.0
+            if "confidence_avg" in row:
+                row["confidence_avg"] = float(row["confidence_avg"]) if row["confidence_avg"] != "" else None
+            if "word_count" in row:
+                row["word_count"] = int(row["word_count"]) if row["word_count"] != "" else 0
+            if "confidence" in row:
+                row["confidence"] = float(row["confidence"]) if row["confidence"] != "" else None
+            if "is_low_confidence" in row:
+                row["is_low_confidence"] = str(row["is_low_confidence"]).lower() == "true"
+        return rows
 
 
-def group_entries_by_duration(entries, chunk_duration_minutes):
-    """
-    Group transcript entries into time-based chunks.
-    """
-    chunk_duration_seconds = chunk_duration_minutes * 60
-    chunks = []
-    current_chunk = []
-    current_chunk_start_time = 0
-
-    for entry in entries:
-        current_time = entry["start_seconds"]
-        if not current_chunk:
-            current_chunk_start_time = current_time
-            current_chunk.append(entry)
-            continue
-
-        if current_time - current_chunk_start_time <= chunk_duration_seconds:
-            current_chunk.append(entry)
-        else:
-            chunks.append(current_chunk)
-            current_chunk = [entry]
-            current_chunk_start_time = current_time
-
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    return chunks
+def resolve_output_dir(output_arg: str | None, manifest_path: Path) -> Path:
+    if output_arg is None:
+        return manifest_path.parent / "output"
+    return Path(output_arg).resolve()
 
 
-def summarize_speaker_activity(entries):
-    """
-    Build simple speaker activity stats from transcript entries.
-    """
-    stats = defaultdict(lambda: {"turns": 0, "words": 0})
-    for entry in entries:
-        speaker = entry["speaker"]
-        stats[speaker]["turns"] += 1
-        stats[speaker]["words"] += len(entry["text"].split())
-
-    return dict(sorted(stats.items(), key=lambda item: item[0].lower()))
+def requires_mono_provider_input(backend: str) -> bool:
+    return backend in {"parakeet", "canary"}
 
 
-def write_agent_outputs(merged_file, chunk_duration_minutes=30):
-    """
-    Write JSONL and Markdown artifacts designed for AI summary agents.
-    """
-    merged_path = Path(merged_file)
-    entries = read_merged_entries(merged_path)
-    if not entries:
-        print("No merged transcript entries found for agent outputs.")
-        return
+def main() -> int:
+    args = parse_args()
+    manifest_path = Path(args.manifest).resolve()
+    output_dir = resolve_output_dir(args.output, manifest_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    chunks = group_entries_by_duration(entries, chunk_duration_minutes)
-    agent_dir = merged_path.parent / "agent"
-    chunk_dir = agent_dir / "chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-    for old_chunk in chunk_dir.glob("chunk_*.md"):
-        old_chunk.unlink()
+    manifest = load_manifest(manifest_path)
+    manifest.apply_overrides(
+        backend=args.backend,
+        model=args.model,
+        device=args.device,
+    )
+    manifest.validate_audio_files()
 
-    jsonl_path = agent_dir / "session_transcript.jsonl"
-    with open(jsonl_path, "w", encoding="utf-8", newline="\n") as f:
-        for index, entry in enumerate(entries, start=1):
-            payload = {
-                "index": index,
-                "start": entry["start"],
-                "end": entry["end"],
-                "speaker": entry["speaker"],
-                "text": entry["text"],
-            }
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-    speaker_stats = summarize_speaker_activity(entries)
-    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    session_start = entries[0]["start"]
-    session_end = entries[-1]["end"]
-    session_duration = format_duration(
-        entries[-1]["end_seconds"] - entries[0]["start_seconds"]
+    raw_dir = output_dir / "raw"
+    configure_quiet_backend_logging(verbose=args.verbose)
+    provider_context = ProviderContext(
+        backend=manifest.transcription.backend,
+        model=manifest.transcription.model,
+        device=manifest.transcription.device,
+        language=manifest.transcription.language,
+        verbose=args.verbose,
     )
 
-    brief_path = agent_dir / "session_summary_input.md"
-    with open(brief_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("# Session Summary Input\n\n")
-        f.write("## Agent Instructions\n\n")
-        f.write("- Use this transcript to produce a chronological session summary.\n")
-        f.write("- Preserve speaker-attributed facts when they affect decisions or intent.\n")
-        f.write("- Separate confirmed events from inferred motivations or unresolved questions.\n")
-        f.write("- Track names, places, items, quests, decisions, and follow-up hooks.\n")
-        f.write("- Prefer concise recap prose over exhaustive transcript restatement.\n\n")
+    if args.deduplicate:
+        manifest.deduplication.enabled = True
 
-        f.write("## Session Metadata\n\n")
-        f.write(f"- Generated at: {generated_at}\n")
-        f.write(f"- Transcript span: {session_start} to {session_end}\n")
-        f.write(f"- Approximate duration: {session_duration}\n")
-        f.write(f"- Transcript turns: {len(entries)}\n")
-        f.write(f"- Chunk duration: {chunk_duration_minutes} minutes\n\n")
+    from src.normalize.turns import DEDUPLICATION_DECISIONS, DISCARDED_TURNS
+    DEDUPLICATION_DECISIONS.clear()
+    DISCARDED_TURNS.clear()
 
-        f.write("## Speaker Activity\n\n")
-        for speaker, stats in speaker_stats.items():
-            f.write(
-                f"- {speaker}: {stats['turns']} turns, "
-                f"approximately {stats['words']} words\n"
+    # --- FINALIZE MODE ---
+    if args.mode == "finalize":
+        draft_turns_path = output_dir / "draft" / "transcript_turns.draft.csv"
+        draft_words_path = output_dir / "draft" / "transcript_words.draft.csv"
+        
+        print("Finalize mode: loading draft outputs...")
+        try:
+            draft_turns = load_csv_rows(draft_turns_path)
+            draft_words = load_csv_rows(draft_words_path)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}. Please run draft mode first to generate draft files.", file=sys.stderr)
+            return 1
+            
+        print(f"Loaded {len(draft_turns)} draft turns, {len(draft_words)} draft words.")
+        
+        audio_reports = {}
+        for speaker in manifest.speakers:
+            source_path = manifest.resolve_path(speaker.file)
+            audio_reports[speaker.speaker_id] = inspect_audio(source_path)
+            
+        print("Applying glossary corrections...")
+        cleaned_turns, corrections = apply_corrections(draft_turns, manifest.glossary)
+        entities = extract_entities(cleaned_turns, manifest.glossary)
+        chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
+        
+        # Try to load existing quality report to preserve chunk preparation metrics
+        existing_report_path = output_dir / "transcript_quality_report.json"
+        existing_metrics = {}
+        if existing_report_path.exists():
+            try:
+                with existing_report_path.open("r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                    for k in [
+                        "chunk_preparation_wall_clock_time",
+                        "total_chunks_expected",
+                        "chunks_generated",
+                        "chunks_reused",
+                        "chunks_skipped",
+                        "chunks_regenerated",
+                        "chunks_deleted",
+                        "chunking_skipped_whisper",
+                    ]:
+                        if k in existing_data:
+                            existing_metrics[k] = existing_data[k]
+            except Exception:
+                pass
+
+        quality_report = build_quality_report(
+            manifest=manifest,
+            turns=cleaned_turns,
+            words=draft_words,
+            audio_reports=audio_reports,
+            corrections=corrections,
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            nemo_chunking_used=(manifest.transcription.backend in {"parakeet", "canary"}),
+            chunk_duration=manifest.audio.chunk_seconds,
+            wall_clock_time=0.0,
+            **existing_metrics,
+        )
+        
+        print("Exporting canonical and export formats...")
+        
+        # Load raw outputs in finalize mode if they exist to populate completeness reports
+        speaker_raw_outputs = {}
+        for speaker in manifest.speakers:
+            try:
+                speaker_raw_outputs[speaker.speaker_id] = load_raw_output(raw_dir, manifest.transcription.backend, speaker.speaker_id)
+            except Exception:
+                pass
+
+        from src.enrich.completeness import compute_completeness_report
+        completeness_report = compute_completeness_report(manifest, cleaned_turns, audio_reports, speaker_raw_outputs)
+        
+        # Save output/transcript_completeness_report.json
+        comp_report_path = output_dir / "transcript_completeness_report.json"
+        with comp_report_path.open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(completeness_report, f, ensure_ascii=False, indent=2)
+
+        from src.exports.markdown import export_top_level_markdown
+        export_top_level_markdown(output_dir / "transcript.md", manifest, cleaned_turns)
+
+        export_nocodb(
+            output_dir=output_dir,
+            manifest=manifest,
+            turns=cleaned_turns,
+            words=draft_words,
+            entities=entities,
+            corrections=corrections,
+            chunks=chunks,
+            quality_report=quality_report,
+            audio_reports=audio_reports,
+        )
+        export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections, completeness_report, audio_reports)
+        export_vtt(output_dir / "vtt", cleaned_turns)
+        
+        print("\nFinalize mode complete.")
+        print(f"Wrote {len(cleaned_turns)} turns, {len(draft_words)} words, {len(chunks)} chunks.")
+        
+        comp_summary = completeness_report["completeness_summary"]
+        for w in comp_summary["warnings"]:
+            print(f"WARNING: {w}", file=sys.stderr)
+            
+        if manifest.completeness.fail_on_missing_coverage and comp_summary["status"] == "incomplete":
+            print("ERROR: Transcription completeness check failed. Exiting.", file=sys.stderr)
+            return 1
+            
+        return 0
+
+    # --- DRAFT MODE ---
+    provider = get_provider(provider_context)
+
+    is_nemo = provider_context.backend in {"parakeet", "canary"}
+    
+    # Initialize prep metrics
+    chunk_prep_time = 0.0
+    chunks_generated = 0
+    chunks_reused = 0
+    chunks_skipped = 0
+    chunks_regenerated = 0
+    chunks_deleted = 0
+
+    progress_enabled = manifest.progress.enabled and not args.no_progress
+    update_interval = manifest.progress.update_interval_seconds
+
+    # Initialize prep progress reporter if NeMo is selected
+    prep_reporter = ChunkPrepProgressReporter(
+        session_id=manifest.session.id,
+        backend=provider_context.backend,
+        enabled=progress_enabled,
+        update_interval_seconds=update_interval,
+        total_speakers=len(manifest.speakers),
+    )
+    prep_reporter.set_speaker_ids([s.speaker_id for s in manifest.speakers])
+
+    audio_reports = {}
+    for idx, speaker in enumerate(manifest.speakers):
+        source_path = manifest.resolve_path(speaker.file)
+        if is_nemo:
+            prep_reporter.start_speaker(
+                speaker_id=speaker.speaker_id,
+                display_name=speaker.display_name or speaker.character_name or "",
+                source_file=speaker.file,
+                speaker_index=idx,
+                phase="inspecting",
             )
+        audio_reports[speaker.speaker_id] = inspect_audio(source_path)
 
-        f.write("\n## Chunk Index\n\n")
-        for index, chunk in enumerate(chunks, start=1):
-            start = chunk[0]["start"]
-            end = chunk[-1]["end"]
-            speakers = sorted({entry["speaker"] for entry in chunk})
-            f.write(
-                f"- chunk_{index:03d}.md: {start} to {end}, "
-                f"{len(chunk)} turns, speakers: {', '.join(speakers)}\n"
-            )
+    total_audio_seconds = sum(info["duration_seconds"] for info in audio_reports.values())
+    prep_reporter.set_total_audio_seconds(total_audio_seconds)
+    for speaker in manifest.speakers:
+        prep_reporter.set_speaker_duration(
+            speaker.speaker_id, audio_reports[speaker.speaker_id]["duration_seconds"]
+        )
 
-    for index, chunk in enumerate(chunks, start=1):
-        chunk_path = chunk_dir / f"chunk_{index:03d}.md"
-        with open(chunk_path, "w", encoding="utf-8", newline="\n") as f:
-            start = chunk[0]["start"]
-            end = chunk[-1]["end"]
-            f.write(f"# Chunk {index:03d}\n\n")
-            f.write(f"- Time span: {start} to {end}\n")
-            f.write(f"- Turns: {len(chunk)}\n")
-            speakers = sorted({entry["speaker"] for entry in chunk})
-            f.write(f"- Speakers: {', '.join(speakers)}\n\n")
-            f.write("## Transcript\n\n")
-            for entry in chunk:
-                f.write(
-                    f"[{entry['start']} - {entry['end']}] "
-                    f"{entry['speaker']}: {entry['text']}\n"
+    all_chunks = {}
+    total_chunks = 0
+    prepared_paths = {}
+
+    if is_nemo:
+        chunk_prep_start = time.time()
+        for idx, speaker in enumerate(manifest.speakers):
+            source_path = manifest.resolve_path(speaker.file)
+            prepared_path = source_path
+            
+            # Normalization / downmixing step
+            if args.normalize_audio:
+                prep_reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name or speaker.character_name or "",
+                    source_file=speaker.file,
+                    speaker_index=idx,
+                    phase="normalizing",
                 )
+                prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+            elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
+                prep_reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name or speaker.character_name or "",
+                    source_file=speaker.file,
+                    speaker_index=idx,
+                    phase="normalizing",
+                )
+                prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
+                
+            prepared_paths[speaker.speaker_id] = prepared_path
+            
+            # Chunking step
+            chunks_meta = chunk_speaker_audio(
+                manifest=manifest,
+                speaker=speaker,
+                output_dir=output_dir,
+                force_chunks=args.force_chunks,
+                progress_reporter=prep_reporter,
+            )
+            all_chunks[speaker.speaker_id] = chunks_meta
+            total_chunks += len(chunks_meta)
 
-    print(f"Wrote agent JSONL transcript to: {jsonl_path}")
-    print(f"Wrote agent summary input to: {brief_path}")
-    print(f"Wrote {len(chunks)} agent chunk files to: {chunk_dir}")
+        prep_reporter.set_phase("completed")
+        prep_reporter.finish()
+        
+        chunk_prep_time = time.time() - chunk_prep_start
+        chunks_generated = prep_reporter.chunks_generated
+        chunks_reused = prep_reporter.chunks_reused
+        chunks_skipped = prep_reporter.chunks_skipped
+        chunks_regenerated = prep_reporter.chunks_regenerated
+        chunks_deleted = prep_reporter.chunks_deleted
 
+    reporter = ProgressReporter(
+        session_id=manifest.session.id,
+        backend=provider_context.backend,
+        enabled=progress_enabled,
+        update_interval_seconds=update_interval,
+    )
+    if is_nemo:
+        reporter.init_totals(total_chunks, total_audio_seconds)
 
-def chunk_merged_csv(merged_file, chunk_duration_minutes=30):
-    """
-    Splits the merged CSV into smaller chunks of a specified duration.
-    """
-    merged_path = Path(merged_file)
-    chunk_dir = merged_path.parent / "chunked"
-    chunk_dir.mkdir(exist_ok=True)
-    for old_chunk in chunk_dir.glob("chunk_*.csv"):
-        old_chunk.unlink()
+    all_turns = []
+    all_words = []
+    speaker_raw_outputs = {}
+    
+    oom_events = []
+    retried_chunks = []
+    failed_chunks = []
+    chunk_counts = {}
 
-    chunk_duration_seconds = chunk_duration_minutes * 60
-    chunk_number = 1
-    current_chunk_start_time = 0
-    rows_in_chunk = []
+    start_wall_time = time.time()
 
-    print(f"\nChunking transcript into {chunk_duration_minutes}-minute files...")
+    for speaker in manifest.speakers:
+        source_path = manifest.resolve_path(speaker.file)
+        if is_nemo:
+            prepared_path = prepared_paths[speaker.speaker_id]
+        else:
+            prepared_path = source_path
+            if args.normalize_audio:
+                prepared_path = prepare_audio(source_path, output_dir / "prepared_audio")
+            elif requires_mono_provider_input(provider_context.backend) and needs_mono_downmix(audio_reports[speaker.speaker_id]):
+                prepared_path = prepare_mono_flac(source_path, output_dir / "prepared_audio")
 
-    with open(merged_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)  # Skip header
-
-        for row in reader:
-            time_str = row[0]
-            current_time = time_to_seconds(time_str)
-
-            if not rows_in_chunk:
-                # This is the first row of a new chunk
-                current_chunk_start_time = current_time
-                rows_in_chunk.append(row)
+        if args.skip_transcription:
+            raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
+        else:
+            if is_nemo:
+                speaker_chunks = all_chunks[speaker.speaker_id]
+                speaker_audio_dur = audio_reports[speaker.speaker_id]["duration_seconds"]
+                
+                reporter.start_speaker(
+                    speaker_id=speaker.speaker_id,
+                    display_name=speaker.display_name,
+                    speaker_chunks_total=len(speaker_chunks),
+                    speaker_audio_total=speaker_audio_dur,
+                )
+                
+                def progress_cb(chunk_duration):
+                    reporter.complete_chunk(chunk_duration)
+                    
+                raw_output = provider.transcribe(
+                    audio_path=prepared_path,
+                    speaker=speaker,
+                    chunks=speaker_chunks,
+                    resume=args.resume,
+                    output_dir=output_dir,
+                    progress_callback=progress_cb,
+                    sample_rate=manifest.audio.sample_rate,
+                    chunk_format=manifest.audio.chunk_format,
+                    overlap_seconds=manifest.audio.overlap_seconds,
+                )
             else:
-                # Check if adding this row exceeds the chunk duration
-                if current_time - current_chunk_start_time <= chunk_duration_seconds:
-                    rows_in_chunk.append(row)
-                else:
-                    # Write the current chunk to a file
-                    chunk_filename = chunk_dir / f"chunk_{chunk_number}.csv"
-                    with open(
-                        chunk_filename, "w", newline="", encoding="utf-8"
-                    ) as chunk_f:
-                        writer = csv.writer(chunk_f)
-                        writer.writerow(header)
-                        writer.writerows(rows_in_chunk)
-                    print(
-                        f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}"
-                    )
+                if progress_enabled:
+                    print(f"[{format_duration(time.time() - start_wall_time)}] Transcribing speaker {speaker.speaker_id}...")
+                
+                raw_output = provider.transcribe(prepared_path, speaker)
+                
+                if progress_enabled:
+                    print(f"[{format_duration(time.time() - start_wall_time)}] Completed transcribing {speaker.speaker_id}.")
 
-                    # Start a new chunk
-                    chunk_number += 1
-                    rows_in_chunk = [row]
-                    current_chunk_start_time = current_time
+        export_raw(raw_dir, provider_context.backend, speaker.speaker_id, raw_output)
+        speaker_raw_outputs[speaker.speaker_id] = raw_output
 
-    # Write the last remaining chunk
-    if rows_in_chunk:
-        chunk_filename = chunk_dir / f"chunk_{chunk_number}.csv"
-        with open(chunk_filename, "w", newline="", encoding="utf-8") as chunk_f:
-            writer = csv.writer(chunk_f)
-            writer.writerow(header)
-            writer.writerows(rows_in_chunk)
-        print(f"  - Wrote {len(rows_in_chunk)} lines to {chunk_filename.name}")
+        if "oom_events" in raw_output:
+            oom_events.extend(raw_output["oom_events"])
+        if "retried_chunks" in raw_output:
+            retried_chunks.extend(raw_output["retried_chunks"])
+        if "failed_chunks" in raw_output:
+            failed_chunks.extend(raw_output["failed_chunks"])
+        if "chunks" in raw_output:
+            chunk_counts[speaker.speaker_id] = len(raw_output["chunks"])
 
-    print("Finished chunking.")
+        turns = normalize_turns(
+            manifest=manifest,
+            speaker=speaker,
+            raw_output=raw_output,
+            backend=provider_context.backend,
+            model=provider_context.model,
+        )
+        words = normalize_words(
+            manifest=manifest,
+            speaker=speaker,
+            raw_output=raw_output,
+            turns=turns,
+            backend=provider_context.backend,
+            model=provider_context.model,
+        )
+        all_turns.extend(turns)
+        all_words.extend(words)
+
+    reporter.finish()
+    
+    wall_clock_time = time.time() - start_wall_time
+
+    merged_turns = merge_turns(all_turns)
+    cleaned_turns, corrections = apply_corrections(merged_turns, manifest.glossary)
+    entities = extract_entities(cleaned_turns, manifest.glossary)
+    
+    glossary_candidates, noise_candidates = build_glossary_candidates(
+        manifest=manifest,
+        turns=cleaned_turns,
+        words=all_words,
+        corrections=corrections,
+    )
+    
+    chunks = build_chunks(cleaned_turns, manifest, chunk_minutes=args.chunk_minutes)
+    
+    quality_report = build_quality_report(
+        manifest=manifest,
+        turns=cleaned_turns,
+        words=all_words,
+        audio_reports=audio_reports,
+        corrections=corrections,
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        speaker_raw_outputs=speaker_raw_outputs,
+        oom_events=oom_events,
+        retried_chunks=retried_chunks,
+        failed_chunks=failed_chunks,
+        deduplication_decisions=list(DEDUPLICATION_DECISIONS),
+        nemo_chunking_used=is_nemo,
+        chunk_duration=manifest.audio.chunk_seconds,
+        wall_clock_time=wall_clock_time,
+        chunk_preparation_wall_clock_time=chunk_prep_time,
+        total_chunks_expected=total_chunks,
+        chunks_generated=chunks_generated,
+        chunks_reused=chunks_reused,
+        chunks_skipped=chunks_skipped,
+        chunks_regenerated=chunks_regenerated,
+        chunks_deleted=chunks_deleted,
+        chunking_skipped_whisper=not is_nemo,
+    )
+
+    from src.enrich.completeness import compute_completeness_report
+    completeness_report = compute_completeness_report(manifest, cleaned_turns, audio_reports, speaker_raw_outputs)
+    
+    # Save output/transcript_completeness_report.json
+    comp_report_path = output_dir / "transcript_completeness_report.json"
+    with comp_report_path.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(completeness_report, f, ensure_ascii=False, indent=2)
+
+    from src.exports.markdown import export_top_level_markdown
+    export_top_level_markdown(output_dir / "transcript.md", manifest, cleaned_turns)
+
+    # Write deduplication audit file if enabled
+    if manifest.deduplication.enabled:
+        audit_path = output_dir / "deduplication_audit.jsonl"
+        with audit_path.open("w", encoding="utf-8", newline="\n") as f:
+            for turn in DISCARDED_TURNS:
+                f.write(json.dumps(turn, ensure_ascii=False) + "\n")
+
+    export_nocodb(
+        output_dir=output_dir,
+        manifest=manifest,
+        turns=cleaned_turns,
+        words=all_words,
+        entities=entities,
+        corrections=corrections,
+        chunks=chunks,
+        quality_report=quality_report,
+        audio_reports=audio_reports,
+    )
+    export_glossary_candidates(output_dir, glossary_candidates)
+    export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
+    export_noise_report(output_dir, noise_candidates, manifest.glossary_candidate_filters.include_noise_report)
+    export_vtt(output_dir / "vtt", cleaned_turns)
+
+    # Print summary to console
+    total_audio_seconds = sum(info.get("duration_seconds", 0) for info in audio_reports.values())
+    avg_speed = (total_audio_seconds / 60.0) / (wall_clock_time / 60.0) if wall_clock_time > 0 else 0.0
+    
+    print("\n--- Transcription Summary ---")
+    print(f"Backend: {provider_context.backend}")
+    print(f"Model: {provider_context.model}")
+    print(f"Total Audio Duration: {format_duration(total_audio_seconds)} ({total_audio_seconds/60.0:.1f} minutes)")
+    print(f"Total Wall-clock Time: {format_duration(wall_clock_time)}")
+    print(f"Average Processing Speed: {avg_speed:.1f} audio-min / wall-min")
+    if is_nemo:
+        print(f"Total Chunks: {total_chunks}")
+        print(f"Failed Chunks: {len(failed_chunks)}")
+        print(f"Retried Chunks: {len(retried_chunks)}")
+        print(f"CUDA OOM Events: {len(oom_events)}")
+        print(f"Boundary Deduplications: {len(DEDUPLICATION_DECISIONS)}")
+    print("-----------------------------\n")
+
+    print("Done.")
+    print(
+        f"Wrote {len(cleaned_turns)} turns, {len(all_words)} words, "
+        f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates "
+        f"(and {len(noise_candidates)} noise candidates filtered)."
+    )
+    
+    comp_summary = completeness_report["completeness_summary"]
+    for w in comp_summary["warnings"]:
+        print(f"WARNING: {w}", file=sys.stderr)
+        
+    if manifest.completeness.fail_on_missing_coverage and comp_summary["status"] == "incomplete":
+        print("ERROR: Transcription completeness check failed. Exiting.", file=sys.stderr)
+        return 1
+        
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        raise SystemExit(130)
