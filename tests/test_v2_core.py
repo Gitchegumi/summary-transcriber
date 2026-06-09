@@ -12,6 +12,7 @@ from src.config.manifest import (
     SpeakerConfig,
     GlossaryConfig,
     GlossaryEntry,
+    load_manifest,
 )
 from src.normalize.turns import normalize_turns
 from src.enrich.corrections import apply_corrections
@@ -224,3 +225,70 @@ class TestV2Core(unittest.TestCase):
         self.assertEqual(score, 5)
         self.assertIn("repeated_term_occurrences_2 (+2)", pos)
         self.assertIn("resembles_existing_glossary_term (+2)", pos)
+
+    def test_manifest_path_resolution_outside_root(self) -> None:
+        """Test that resolve_path successfully resolves paths outside the manifest root."""
+        # Using a relative path that goes up from E:/GitHub/summary-transcriber/test-5/manifest.yaml
+        resolved = self.manifest.resolve_path("../audio/dm.flac")
+        expected = Path("E:/GitHub/summary-transcriber/audio/dm.flac").resolve()
+        self.assertEqual(resolved, expected)
+
+    def test_load_manifest_outside_glossary(self) -> None:
+        """Test that load_manifest resolves glossary sources that are outside manifest root."""
+        import tempfile
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir).resolve()
+            
+            # Create a glossary file outside the manifest root
+            glossary_dir = tmpdir_path / "glossaries"
+            glossary_dir.mkdir()
+            glossary_file = glossary_dir / "campaign.yaml"
+            with glossary_file.open("w", encoding="utf-8") as f:
+                yaml.dump({
+                    "glossary": {
+                        "pcs": [
+                            {"canonical": "SharedHero", "type": "pc"}
+                        ]
+                    }
+                }, f)
+                
+            # Create manifest root directory
+            manifest_dir = tmpdir_path / "session-1"
+            manifest_dir.mkdir()
+            manifest_file = manifest_dir / "manifest.yaml"
+            
+            manifest_data = {
+                "session": {
+                    "id": "session-1",
+                    "campaign": "Campaign",
+                    "session_number": 1,
+                    "session_date": "2026-06-09"
+                },
+                "speakers": [
+                    {
+                        "speaker_id": "dm",
+                        "display_name": "James",
+                        "role": "DM",
+                        "character_name": None,
+                        "file": "audio/dm.flac"
+                    }
+                ],
+                "glossary_sources": [
+                    "../glossaries/campaign.yaml"
+                ]
+            }
+            
+            with manifest_file.open("w", encoding="utf-8") as f:
+                yaml.dump(manifest_data, f)
+                
+            # Load manifest should succeed and resolve the glossary source
+            manifest = load_manifest(manifest_file)
+            self.assertEqual(len(manifest.glossary_sources), 1)
+            self.assertEqual(manifest.glossary_sources[0], "../glossaries/campaign.yaml")
+            
+            # Verify glossary entries were loaded
+            self.assertIn("pcs", manifest.glossary.entries)
+            pcs = manifest.glossary.entries["pcs"]
+            self.assertEqual(len(pcs), 1)
+            self.assertEqual(pcs[0].canonical, "SharedHero")

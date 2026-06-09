@@ -132,12 +132,7 @@ class SessionManifest:
         path = Path(value)
         if not path.is_absolute():
             path = self.root / path
-        resolved = path.resolve()
-        try:
-            resolved.relative_to(self.root.resolve())
-        except ValueError:
-            raise ValueError(f"Path traversal detected: path '{value}' resolves outside manifest root '{self.root}'")
-        return resolved
+        return path.resolve()
 
     def apply_overrides(
         self,
@@ -204,12 +199,7 @@ def load_manifest(path: Path) -> SessionManifest:
         src_path = Path(src)
         if not src_path.is_absolute():
             src_path = manifest_root / src_path
-        resolved = src_path.resolve()
-        try:
-            resolved.relative_to(manifest_root)
-        except ValueError:
-            raise ValueError(f"Path traversal detected in glossary source: {src}")
-        resolved_sources.append(resolved)
+        resolved_sources.append(src_path.resolve())
 
     # Build consolidated glossary entries
     entries: dict[str, list[GlossaryEntry]] = {}
