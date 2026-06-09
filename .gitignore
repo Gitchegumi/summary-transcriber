@@ -67,6 +67,8 @@ env/
 venv/
 ENV/
 *venv/
+test-data/
+test-5/
 
 # IDE / Editor specific
 .idea/

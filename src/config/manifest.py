@@ -97,6 +97,16 @@ class GlossaryCandidateFiltersConfig:
     include_noise_report: bool = True
     custom_noise_terms: list[str] = field(default_factory=list)
 
+@dataclass
+class DeduplicationConfig:
+    enabled: bool = False
+
+
+@dataclass
+class CompletenessConfig:
+    max_missing_seconds_warn: float = 30.0
+    fail_on_missing_coverage: bool = False
+
 
 @dataclass
 class SessionManifest:
@@ -110,6 +120,8 @@ class SessionManifest:
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     glossary: GlossaryConfig = field(default_factory=GlossaryConfig)
     glossary_candidate_filters: GlossaryCandidateFiltersConfig = field(default_factory=GlossaryCandidateFiltersConfig)
+    deduplication: DeduplicationConfig = field(default_factory=DeduplicationConfig)
+    completeness: CompletenessConfig = field(default_factory=CompletenessConfig)
 
     @property
     def root(self) -> Path:
@@ -246,6 +258,17 @@ def load_manifest(path: Path) -> SessionManifest:
         safe_filters["custom_noise_terms"] = []
     glossary_candidate_filters = GlossaryCandidateFiltersConfig(**safe_filters)
 
+    deduplication_data = data.get("deduplication") or {}
+    deduplication_config = DeduplicationConfig(
+        enabled=bool(deduplication_data.get("enabled", False))
+    )
+
+    completeness_data = data.get("completeness") or {}
+    completeness_config = CompletenessConfig(
+        max_missing_seconds_warn=float(completeness_data.get("max_missing_seconds_warn", 30.0)),
+        fail_on_missing_coverage=bool(completeness_data.get("fail_on_missing_coverage", False)),
+    )
+
     return SessionManifest(
         path=path,
         session=session_config,
@@ -257,4 +280,6 @@ def load_manifest(path: Path) -> SessionManifest:
         workflow=workflow_config,
         glossary=glossary_config,
         glossary_candidate_filters=glossary_candidate_filters,
+        deduplication=deduplication_config,
+        completeness=completeness_config,
     )
