@@ -114,7 +114,7 @@ def compute_completeness_report(
         
     # Determine completeness status
     # Max warning threshold from manifest
-    max_missing_warn = getattr(manifest.completeness, "max_missing_seconds_warn", 30.0)
+    max_missing_warn = getattr(manifest.completeness, "max_missing_seconds_warn", 500.0)
     
     warnings = []
     if total_missing_seconds > max_missing_warn:

@@ -105,7 +105,7 @@ class DeduplicationConfig:
 
 @dataclass
 class CompletenessConfig:
-    max_missing_seconds_warn: float = 30.0
+    max_missing_seconds_warn: float = 500.0
     fail_on_missing_coverage: bool = False
 
 
@@ -267,7 +267,7 @@ def load_manifest(path: Path) -> SessionManifest:
 
     completeness_data = data.get("completeness") or {}
     completeness_config = CompletenessConfig(
-        max_missing_seconds_warn=float(completeness_data.get("max_missing_seconds_warn", 30.0)),
+        max_missing_seconds_warn=float(completeness_data.get("max_missing_seconds_warn", 500.0)),
         fail_on_missing_coverage=bool(completeness_data.get("fail_on_missing_coverage", False)),
     )
 

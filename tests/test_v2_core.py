@@ -292,3 +292,35 @@ class TestV2Core(unittest.TestCase):
             pcs = manifest.glossary.entries["pcs"]
             self.assertEqual(len(pcs), 1)
             self.assertEqual(pcs[0].canonical, "SharedHero")
+
+    def test_completeness_warning_threshold_default(self) -> None:
+        """Test that compute_completeness_report uses the new default threshold of 500.0 seconds."""
+        # Total missing is 348.0 seconds
+        turns = [
+            {"speaker_id": "dm", "start_seconds": 0.0, "end_seconds": 152.0},
+        ]
+        audio_reports = {
+            "dm": {"duration_seconds": 500.0},
+        }
+        speaker_raw_outputs = {
+            "dm": {"result": {"text": "dummy text"}},
+        }
+        
+        # Since missing is 348.0 < 500.0, it should be status = 'complete_with_warnings' instead of 'incomplete'
+        report = compute_completeness_report(
+            manifest=self.manifest,
+            turns=turns,
+            audio_reports=audio_reports,
+            speaker_raw_outputs=speaker_raw_outputs,
+        )
+        self.assertEqual(report["completeness_summary"]["status"], "complete_with_warnings")
+        
+        # If we configure the manifest with a lower threshold, e.g. 300.0 seconds, then 348.0 > 300.0, so 'incomplete'
+        self.manifest.completeness.max_missing_seconds_warn = 300.0
+        report2 = compute_completeness_report(
+            manifest=self.manifest,
+            turns=turns,
+            audio_reports=audio_reports,
+            speaker_raw_outputs=speaker_raw_outputs,
+        )
+        self.assertEqual(report2["completeness_summary"]["status"], "incomplete")

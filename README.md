@@ -140,7 +140,7 @@ deduplication:
   enabled: false             # Disable destructive overlap deduplication (default)
 
 completeness:
-  max_missing_seconds_warn: 30.0   # Warn if missing coverage exceeds 30s
+  max_missing_seconds_warn: 500.0   # Warn if missing coverage exceeds 500s
   fail_on_missing_coverage: false  # Exit with code 1 if missing coverage exceeds threshold
 ```
 
