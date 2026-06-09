@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 import yaml
 
@@ -37,16 +36,11 @@ NOISE_REPORT_FIELDS = [
 
 
 def export_glossary_candidates(output_dir: Path, candidates: list[dict]) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "glossary_candidates.csv"
-    with csv_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=GLOSSARY_CANDIDATE_FIELDS, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(candidates)
-
-    json_path = output_dir / "glossary_candidates.json"
-    with json_path.open("w", encoding="utf-8", newline="\n") as f:
-        json.dump(candidates, f, ensure_ascii=False, indent=2)
+    draft_dir = output_dir / "draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = draft_dir / "glossary_candidates.yaml"
+    with yaml_path.open("w", encoding="utf-8", newline="\n") as f:
+        yaml.safe_dump(candidates, f, default_flow_style=False, sort_keys=False)
 
 
 def export_noise_report(output_dir: Path, noise_candidates: list[dict], enabled: bool) -> None:
@@ -101,7 +95,6 @@ def export_draft_outputs(
         if bucket not in glossary_data:
             glossary_data[bucket] = []
         
-        # Build structured entry
         evidence = f"Turn {candidate.get('turn_id', '')}: \"{candidate.get('example_text', '')}\""
         reason_parts = [f"Score: {candidate.get('score', 0)}", f"Reason: {candidate.get('reason', '')}"]
         if candidate.get("positive_signals"):
@@ -112,7 +105,7 @@ def export_draft_outputs(
         
         entry = {
             "canonical": candidate["term"],
-            "type": bucket.rstrip("s"),  # e.g., "pcs" -> "pc"
+            "type": bucket.rstrip("s"),
             "aliases": [],
             "description": f"{reason_str}. Evidence: {evidence}"
         }

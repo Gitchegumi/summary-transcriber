@@ -27,9 +27,7 @@ from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
 from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
 from src.exports.agents import export_agents
-from src.exports.combat_extract import export_combat_extract
 from src.exports.glossary import export_glossary_candidates, export_draft_outputs, export_noise_report
-from src.exports.markdown import export_markdown
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
 from src.exports.vtt import export_vtt
@@ -303,9 +301,7 @@ def main() -> int:
             audio_reports=audio_reports,
         )
         export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections, completeness_report, audio_reports)
-        export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
         export_vtt(output_dir / "vtt", cleaned_turns)
-        export_combat_extract(output_dir, manifest, cleaned_turns)
         
         print("\nFinalize mode complete.")
         print(f"Wrote {len(cleaned_turns)} turns, {len(draft_words)} words, {len(chunks)} chunks.")
@@ -591,10 +587,7 @@ def main() -> int:
     export_glossary_candidates(output_dir, glossary_candidates)
     export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
     export_noise_report(output_dir, noise_candidates, manifest.glossary_candidate_filters.include_noise_report)
-    export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections, completeness_report, audio_reports)
-    export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
     export_vtt(output_dir / "vtt", cleaned_turns)
-    export_combat_extract(output_dir, manifest, cleaned_turns)
 
     # Print summary to console
     total_audio_seconds = sum(info.get("duration_seconds", 0) for info in audio_reports.values())

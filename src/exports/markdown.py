@@ -41,6 +41,8 @@ def export_top_level_markdown(output_file: Path, manifest: SessionManifest, turn
             end_fmt = _format_hhmmss(turn["end_seconds"])
             
             cleaned_text = clean_filler_words(turn["text_cleaned"])
+            if not cleaned_text.strip():
+                continue
             
             f.write(f"[{start_fmt} - {end_fmt}] {speaker_label}:\n{cleaned_text}\n\n")
 
