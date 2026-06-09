@@ -28,7 +28,6 @@ from src.enrich.quality import build_quality_report
 from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
 from src.exports.agents import export_agents
 from src.exports.glossary import export_glossary_candidates, export_draft_outputs, export_noise_report
-from src.exports.markdown import export_markdown
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
 from src.exports.vtt import export_vtt
@@ -115,6 +114,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose mode, showing full log outputs from ASR backends.",
     )
+    parser.add_argument(
+        "--deduplicate",
+        action="store_true",
+        help="Enable boundary overlap deduplication (default: False).",
+    )
     return parser.parse_args()
 
 
@@ -146,18 +150,18 @@ def load_csv_rows(path: Path) -> list[dict]:
         
         # Coerce types for fields
         for row in rows:
-            if "start_seconds" in row and row["start_seconds"] != "":
-                row["start_seconds"] = float(row["start_seconds"])
-            if "end_seconds" in row and row["end_seconds"] != "":
-                row["end_seconds"] = float(row["end_seconds"])
-            if "duration_seconds" in row and row["duration_seconds"] != "":
-                row["duration_seconds"] = float(row["duration_seconds"])
-            if "confidence_avg" in row and row["confidence_avg"] != "":
-                row["confidence_avg"] = float(row["confidence_avg"])
-            if "word_count" in row and row["word_count"] != "":
-                row["word_count"] = int(row["word_count"])
-            if "confidence" in row and row["confidence"] != "":
-                row["confidence"] = float(row["confidence"])
+            if "start_seconds" in row:
+                row["start_seconds"] = float(row["start_seconds"]) if row["start_seconds"] != "" else 0.0
+            if "end_seconds" in row:
+                row["end_seconds"] = float(row["end_seconds"]) if row["end_seconds"] != "" else 0.0
+            if "duration_seconds" in row:
+                row["duration_seconds"] = float(row["duration_seconds"]) if row["duration_seconds"] != "" else 0.0
+            if "confidence_avg" in row:
+                row["confidence_avg"] = float(row["confidence_avg"]) if row["confidence_avg"] != "" else None
+            if "word_count" in row:
+                row["word_count"] = int(row["word_count"]) if row["word_count"] != "" else 0
+            if "confidence" in row:
+                row["confidence"] = float(row["confidence"]) if row["confidence"] != "" else None
             if "is_low_confidence" in row:
                 row["is_low_confidence"] = str(row["is_low_confidence"]).lower() == "true"
         return rows
@@ -197,8 +201,12 @@ def main() -> int:
         verbose=args.verbose,
     )
 
-    from src.normalize.turns import DEDUPLICATION_DECISIONS
+    if args.deduplicate:
+        manifest.deduplication.enabled = True
+
+    from src.normalize.turns import DEDUPLICATION_DECISIONS, DISCARDED_TURNS
     DEDUPLICATION_DECISIONS.clear()
+    DISCARDED_TURNS.clear()
 
     # --- FINALIZE MODE ---
     if args.mode == "finalize":
@@ -261,6 +269,26 @@ def main() -> int:
         )
         
         print("Exporting canonical and export formats...")
+        
+        # Load raw outputs in finalize mode if they exist to populate completeness reports
+        speaker_raw_outputs = {}
+        for speaker in manifest.speakers:
+            try:
+                speaker_raw_outputs[speaker.speaker_id] = load_raw_output(raw_dir, manifest.transcription.backend, speaker.speaker_id)
+            except Exception:
+                pass
+
+        from src.enrich.completeness import compute_completeness_report
+        completeness_report = compute_completeness_report(manifest, cleaned_turns, audio_reports, speaker_raw_outputs)
+        
+        # Save output/transcript_completeness_report.json
+        comp_report_path = output_dir / "transcript_completeness_report.json"
+        with comp_report_path.open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(completeness_report, f, ensure_ascii=False, indent=2)
+
+        from src.exports.markdown import export_top_level_markdown
+        export_top_level_markdown(output_dir / "transcript.md", manifest, cleaned_turns)
+
         export_nocodb(
             output_dir=output_dir,
             manifest=manifest,
@@ -272,12 +300,20 @@ def main() -> int:
             quality_report=quality_report,
             audio_reports=audio_reports,
         )
-        export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
-        export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
+        export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections, completeness_report, audio_reports)
         export_vtt(output_dir / "vtt", cleaned_turns)
         
         print("\nFinalize mode complete.")
         print(f"Wrote {len(cleaned_turns)} turns, {len(draft_words)} words, {len(chunks)} chunks.")
+        
+        comp_summary = completeness_report["completeness_summary"]
+        for w in comp_summary["warnings"]:
+            print(f"WARNING: {w}", file=sys.stderr)
+            
+        if manifest.completeness.fail_on_missing_coverage and comp_summary["status"] == "incomplete":
+            print("ERROR: Transcription completeness check failed. Exiting.", file=sys.stderr)
+            return 1
+            
         return 0
 
     # --- DRAFT MODE ---
@@ -519,6 +555,24 @@ def main() -> int:
         chunking_skipped_whisper=not is_nemo,
     )
 
+    from src.enrich.completeness import compute_completeness_report
+    completeness_report = compute_completeness_report(manifest, cleaned_turns, audio_reports, speaker_raw_outputs)
+    
+    # Save output/transcript_completeness_report.json
+    comp_report_path = output_dir / "transcript_completeness_report.json"
+    with comp_report_path.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(completeness_report, f, ensure_ascii=False, indent=2)
+
+    from src.exports.markdown import export_top_level_markdown
+    export_top_level_markdown(output_dir / "transcript.md", manifest, cleaned_turns)
+
+    # Write deduplication audit file if enabled
+    if manifest.deduplication.enabled:
+        audit_path = output_dir / "deduplication_audit.jsonl"
+        with audit_path.open("w", encoding="utf-8", newline="\n") as f:
+            for turn in DISCARDED_TURNS:
+                f.write(json.dumps(turn, ensure_ascii=False) + "\n")
+
     export_nocodb(
         output_dir=output_dir,
         manifest=manifest,
@@ -533,8 +587,6 @@ def main() -> int:
     export_glossary_candidates(output_dir, glossary_candidates)
     export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
     export_noise_report(output_dir, noise_candidates, manifest.glossary_candidate_filters.include_noise_report)
-    export_agents(output_dir / "agents", manifest, cleaned_turns, chunks, corrections)
-    export_markdown(output_dir / "markdown", manifest, cleaned_turns, chunks)
     export_vtt(output_dir / "vtt", cleaned_turns)
 
     # Print summary to console
@@ -561,6 +613,15 @@ def main() -> int:
         f"{len(chunks)} chunks, {len(glossary_candidates)} glossary candidates "
         f"(and {len(noise_candidates)} noise candidates filtered)."
     )
+    
+    comp_summary = completeness_report["completeness_summary"]
+    for w in comp_summary["warnings"]:
+        print(f"WARNING: {w}", file=sys.stderr)
+        
+    if manifest.completeness.fail_on_missing_coverage and comp_summary["status"] == "incomplete":
+        print("ERROR: Transcription completeness check failed. Exiting.", file=sys.stderr)
+        return 1
+        
     return 0
 
 
