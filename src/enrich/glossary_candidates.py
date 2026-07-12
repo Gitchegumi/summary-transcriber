@@ -282,6 +282,8 @@ STOPWORDS = {
     "speak",
     "stay",
     "ninja",
+    "tall",
+    "short",
 }
 
 FILLER_WORDS = {
