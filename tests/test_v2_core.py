@@ -391,6 +391,26 @@ class TestV2Core(unittest.TestCase):
         self.assertEqual(dm_report["missing_ranges"], [[60.0, 100.0]])
         self.assertEqual(dm_report["total_missing_seconds"], 40.0)
         self.assertEqual(report["completeness_summary"]["status"], "complete_with_warnings")
+    def test_universal_table_chatter_is_stopword_noise(self) -> None:
+        turns = []
+        for index, term in enumerate(("Hang", "Look", "Hold", "Definitely"), start=1):
+            turns.append({
+                "turn_id": f"turn-{index}",
+                "speaker_id": "dm",
+                "text_cleaned": f"{term} on a moment.",
+                "start_seconds": float(index),
+                "end_seconds": float(index + 1),
+            })
+
+        candidates, noise = build_glossary_candidates(
+            self.manifest, turns, words=[], corrections=[]
+        )
+
+        candidate_terms = {row["term"].lower() for row in candidates}
+        noise_terms = {row["term"].lower() for row in noise}
+        for term in ("hang", "look", "hold", "definitely"):
+            self.assertNotIn(term, candidate_terms)
+            self.assertIn(term, noise_terms)
     def test_glossary_candidates_exclude_components_of_known_terms(self) -> None:
         self.manifest.glossary.entries["spells"] = [
             GlossaryEntry(canonical="Hunger of Hadar", type="spell")
