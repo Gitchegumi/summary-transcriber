@@ -446,6 +446,23 @@ class NemoProviderBase:
         self._model = model
         return model
 
+    def transcribe_batch(
+        self,
+        jobs: list[dict],
+        output_dir: Path,
+        **kwargs: Any,
+    ) -> dict[str, dict]:
+        from src.providers.nemo_batch import transcribe_nemo_batch
+
+        return transcribe_nemo_batch(
+            provider_name=self.provider_name,
+            model=self._load_model(),
+            jobs=jobs,
+            output_dir=output_dir,
+            verbose=getattr(self.context, "verbose", False),
+            **kwargs,
+        )
+
     def transcribe(
         self,
         audio_path: Path,

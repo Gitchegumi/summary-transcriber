@@ -35,14 +35,6 @@ NOISE_REPORT_FIELDS = [
 ]
 
 
-def export_glossary_candidates(output_dir: Path, candidates: list[dict]) -> None:
-    draft_dir = output_dir / "draft"
-    draft_dir.mkdir(parents=True, exist_ok=True)
-    yaml_path = draft_dir / "glossary_candidates.yaml"
-    with yaml_path.open("w", encoding="utf-8", newline="\n") as f:
-        yaml.safe_dump(candidates, f, default_flow_style=False, sort_keys=False)
-
-
 def export_noise_report(output_dir: Path, noise_candidates: list[dict], enabled: bool) -> None:
     if not enabled:
         return
@@ -63,6 +55,12 @@ def export_draft_outputs(
 ) -> None:
     draft_dir = output_dir / "draft"
     draft_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove the redundant detailed YAML produced by older versions. The CSV
+    # remains the review artifact; candidate_glossary.yaml is import-ready.
+    legacy_candidates = draft_dir / "glossary_candidates.yaml"
+    if legacy_candidates.exists():
+        legacy_candidates.unlink()
 
     # 1. transcript_turns.draft.csv
     turns_path = draft_dir / "transcript_turns.draft.csv"

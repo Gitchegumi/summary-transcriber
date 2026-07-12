@@ -69,8 +69,20 @@ def normalize_turns(
             
         for index, segment in enumerate(segments, start=1):
             text = str(segment.get("text") or "").strip()
-            start = float(segment.get("start") or segment.get("start_seconds") or 0) + chunk_start
-            end = float(segment.get("end") or segment.get("end_seconds") or start) + chunk_start
+            relative_start = float(
+                segment.get("start") or segment.get("start_seconds") or 0
+            )
+            relative_end = float(
+                segment.get("end") or segment.get("end_seconds") or 0
+            )
+            start = chunk_start + relative_start
+            # NeMo sometimes returns chunk text without segment timestamps. In
+            # that case the most accurate available interval is the chunk itself.
+            end = (
+                chunk_start + relative_end
+                if relative_end > relative_start
+                else chunk_end
+            )
             words = _extract_words(segment)
             confidence = _avg_confidence(words, segment.get("confidence"))
             
@@ -236,7 +248,8 @@ def _extract_segments(raw_output: dict) -> list[dict]:
             return [_coerce_segment(item) for item in value]
 
     # 2. Check for NeMo style hypothesis with timestep
-    timestep = result.get("timestep")
+    # NeMo 2.7 uses `timestamp`; older hypotheses used `timestep`.
+    timestep = result.get("timestamp") or result.get("timestep")
     if isinstance(timestep, dict):
         segments = timestep.get("segment")
         words = timestep.get("word") or []
@@ -246,8 +259,10 @@ def _extract_segments(raw_output: dict) -> list[dict]:
             extracted = []
             for seg in segments:
                 seg_dict = _coerce_segment(seg)
-                start = _get_timestamp_key(seg_dict, ["start_offset", "start_time", "start_seconds", "start"])
-                end = _get_timestamp_key(seg_dict, ["end_offset", "end_time", "end_seconds", "end"])
+                if not seg_dict.get("text"):
+                    seg_dict["text"] = seg_dict.get("segment") or ""
+                start = _get_timestamp_key(seg_dict, ["start", "start_time", "start_seconds", "start_offset"])
+                end = _get_timestamp_key(seg_dict, ["end", "end_time", "end_seconds", "end_offset"])
                 seg_dict["start"] = start if start is not None else 0.0
                 seg_dict["end"] = end if end is not None else 0.0
                 
@@ -256,8 +271,8 @@ def _extract_segments(raw_output: dict) -> list[dict]:
                     seg_words = []
                     for w in words:
                         w_dict = _coerce_segment(w)
-                        w_start = _get_timestamp_key(w_dict, ["start_offset", "start_time", "start_seconds", "start"])
-                        w_end = _get_timestamp_key(w_dict, ["end_offset", "end_time", "end_seconds", "end"])
+                        w_start = _get_timestamp_key(w_dict, ["start", "start_time", "start_seconds", "start_offset"])
+                        w_end = _get_timestamp_key(w_dict, ["end", "end_time", "end_seconds", "end_offset"])
                         if w_start is not None and w_end is not None:
                             if w_start >= seg_dict["start"] and w_end <= seg_dict["end"]:
                                 seg_words.append(w_dict)
@@ -272,8 +287,8 @@ def _extract_segments(raw_output: dict) -> list[dict]:
             max_end = None
             for w in words:
                 w_dict = _coerce_segment(w)
-                w_start = _get_timestamp_key(w_dict, ["start_offset", "start_time", "start_seconds", "start"])
-                w_end = _get_timestamp_key(w_dict, ["end_offset", "end_time", "end_seconds", "end"])
+                w_start = _get_timestamp_key(w_dict, ["start", "start_time", "start_seconds", "start_offset"])
+                w_end = _get_timestamp_key(w_dict, ["end", "end_time", "end_seconds", "end_offset"])
                 w_word = w_dict.get("word") or w_dict.get("text") or w_dict.get("char") or ""
                 
                 w_dict["word"] = w_word
@@ -298,8 +313,8 @@ def _extract_segments(raw_output: dict) -> list[dict]:
     # 3. If there is a top-level text but no segments
     if "text" in result:
         words = result.get("words") or result.get("word_timestamps") or []
-        start = _get_timestamp_key(result, ["start_offset", "start_time", "start_seconds", "start"]) or 0.0
-        end = _get_timestamp_key(result, ["end_offset", "end_time", "end_seconds", "end"]) or 0.0
+        start = _get_timestamp_key(result, ["start", "start_time", "start_seconds", "start_offset"]) or 0.0
+        end = _get_timestamp_key(result, ["end", "end_time", "end_seconds", "end_offset"]) or 0.0
         return [{
             "text": result["text"],
             "start": start,

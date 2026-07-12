@@ -67,6 +67,8 @@ STOPWORDS = {
     "you",
     "your",
     "you're",
+    "don't",
+    "hello",
     "i'm",
     "i'll",
     "i've",
@@ -81,6 +83,7 @@ STOPWORDS = {
     "about",
     "after",
     "again",
+    "pretty",
     "also",
     "because",
     "before",
@@ -265,9 +268,12 @@ STOPWORDS = {
     "five",
     "six",
     "seven",
+    "she's",
     "eight",
     "nine",
     "ten",
+    "without",
+    "give",
 }
 
 FILLER_WORDS = {
@@ -289,6 +295,7 @@ FILLER_WORDS = {
     "okay",
     "hey",
     "huh",
+    "let",
     "oh",
     "ooh",
     "wow",
@@ -304,6 +311,7 @@ FILLER_WORDS = {
     "cool",
     "fine",
     "sorry",
+    "beyond",
 }
 
 PROFANITY = {
@@ -325,6 +333,7 @@ REAL_PEOPLE = {
     "john",
     "brandon",
     "matt",
+    "mat",
     "travis",
     "laura",
     "liam",
@@ -348,16 +357,29 @@ REAL_PEOPLE = {
     "gm",
     "d&d",
     "dnd",
+    "discord",
+    "github",
+    "niel",
+    "mac",
+    "ian",
 }
 
 CONTEXT_CLUES = {
     "npc",
     "familiar",
+    "hit",
+    "damage",
     "spell",
     "city",
     "location",
     "faction",
     "item",
+    "magic",
+    "tall",
+    "attack",
+    "bonus",
+    "roll",
+    "check",
     "god",
     "deity",
     "patron",
@@ -412,8 +434,50 @@ CONTEXT_CLUES = {
     "bard",
     "monk",
     "barbarian",
+    "battle",
+    "move",
+    "people",
+    "stay",
+    "simple",
+    "flies",
+    "fly",
+    "wood",
+    "build",
+    "definitely",
+    "sneak",
+    "knowledge",
+    "athletics",
+    "mage",
+    "hang",
+    "hold",
+    "look",
+    "show",
+    "needle",
+    "needles",
+    "nibble",
 }
 
+
+def _is_known_term_or_component(term: str, known_terms: set[str]) -> bool:
+    """Return true for exact glossary terms and their whole-word subphrases."""
+    normalized = " ".join(term.lower().split())
+    if not normalized:
+        return False
+    if normalized in known_terms:
+        return True
+
+    candidate_words = normalized.split()
+    for known_term in known_terms:
+        known_words = known_term.split()
+        if len(known_words) <= len(candidate_words):
+            continue
+        width = len(candidate_words)
+        if any(
+            known_words[index:index + width] == candidate_words
+            for index in range(len(known_words) - width + 1)
+        ):
+            return True
+    return False
 
 def build_glossary_candidates(
     manifest: SessionManifest,
@@ -469,7 +533,7 @@ def build_glossary_candidates(
     for turn in turns:
         text = turn.get("text_cleaned", "")
         for term in _capitalized_terms(text):
-            if term.lower() in known_terms or not term:
+            if _is_known_term_or_component(term, known_terms) or not term:
                 continue
             term_lower = term.lower()
             start_count, total_count = check_sentence_starts(text, term)
