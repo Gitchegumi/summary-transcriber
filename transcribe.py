@@ -34,7 +34,7 @@ from src.enrich.glossary_candidates import build_glossary_candidates
 from src.enrich.quality import build_quality_report
 from src.progress.reporter import ProgressReporter, ChunkPrepProgressReporter, format_duration
 from src.exports.agents import export_agents
-from src.exports.glossary import export_glossary_candidates, export_draft_outputs, export_noise_report
+from src.exports.glossary import export_draft_outputs, export_noise_report
 from src.exports.nocodb import export_nocodb
 from src.exports.raw import export_raw
 from src.exports.vtt import export_vtt
@@ -438,9 +438,42 @@ def main() -> int:
     oom_events = []
     retried_chunks = []
     failed_chunks = []
+    batch_fallback_events = []
     chunk_counts = {}
 
     start_wall_time = time.time()
+
+    batched_outputs = {}
+    if is_nemo and not args.skip_transcription:
+        jobs = [
+            {
+                "speaker": speaker,
+                "audio_path": prepared_paths[speaker.speaker_id],
+                "chunks": all_chunks[speaker.speaker_id],
+            }
+            for speaker in manifest.speakers
+        ]
+
+        def batch_progress_cb(_speaker_id, chunk_duration):
+            reporter.complete_chunk(chunk_duration)
+
+        reporter.start_speaker(
+            speaker_id="all-tracks",
+            display_name=f"{len(manifest.speakers)} simultaneous streams",
+            speaker_chunks_total=total_chunks,
+            speaker_audio_total=total_audio_seconds,
+        )
+
+        batched_outputs = provider.transcribe_batch(
+            jobs=jobs,
+            output_dir=output_dir,
+            batch_size=manifest.transcription.batch_size,
+            resume=args.resume,
+            sample_rate=manifest.audio.sample_rate,
+            chunk_format=manifest.audio.chunk_format,
+            overlap_seconds=manifest.audio.overlap_seconds,
+            progress_callback=batch_progress_cb,
+        )
 
     for speaker in manifest.speakers:
         source_path = manifest.resolve_path(speaker.file)
@@ -457,30 +490,7 @@ def main() -> int:
             raw_output = load_raw_output(raw_dir, provider_context.backend, speaker.speaker_id)
         else:
             if is_nemo:
-                speaker_chunks = all_chunks[speaker.speaker_id]
-                speaker_audio_dur = audio_reports[speaker.speaker_id]["duration_seconds"]
-                
-                reporter.start_speaker(
-                    speaker_id=speaker.speaker_id,
-                    display_name=speaker.display_name,
-                    speaker_chunks_total=len(speaker_chunks),
-                    speaker_audio_total=speaker_audio_dur,
-                )
-                
-                def progress_cb(chunk_duration):
-                    reporter.complete_chunk(chunk_duration)
-                    
-                raw_output = provider.transcribe(
-                    audio_path=prepared_path,
-                    speaker=speaker,
-                    chunks=speaker_chunks,
-                    resume=args.resume,
-                    output_dir=output_dir,
-                    progress_callback=progress_cb,
-                    sample_rate=manifest.audio.sample_rate,
-                    chunk_format=manifest.audio.chunk_format,
-                    overlap_seconds=manifest.audio.overlap_seconds,
-                )
+                raw_output = batched_outputs[speaker.speaker_id]
             else:
                 if progress_enabled:
                     print(f"[{format_duration(time.time() - start_wall_time)}] Transcribing speaker {speaker.speaker_id}...")
@@ -499,6 +509,8 @@ def main() -> int:
             retried_chunks.extend(raw_output["retried_chunks"])
         if "failed_chunks" in raw_output:
             failed_chunks.extend(raw_output["failed_chunks"])
+        if "batch_fallback_events" in raw_output:
+            batch_fallback_events.extend(raw_output["batch_fallback_events"])
         if "chunks" in raw_output:
             chunk_counts[speaker.speaker_id] = len(raw_output["chunks"])
 
@@ -591,7 +603,6 @@ def main() -> int:
         quality_report=quality_report,
         audio_reports=audio_reports,
     )
-    export_glossary_candidates(output_dir, glossary_candidates)
     export_draft_outputs(output_dir, glossary_candidates, cleaned_turns, all_words)
     export_noise_report(output_dir, noise_candidates, manifest.glossary_candidate_filters.include_noise_report)
     export_vtt(output_dir / "vtt", cleaned_turns)
@@ -611,6 +622,8 @@ def main() -> int:
         print(f"Failed Chunks: {len(failed_chunks)}")
         print(f"Retried Chunks: {len(retried_chunks)}")
         print(f"CUDA OOM Events: {len(oom_events)}")
+        unique_batch_fallbacks = {json.dumps(event, sort_keys=True) for event in batch_fallback_events}
+        print(f"Multi-track Batch Fallbacks: {len(unique_batch_fallbacks)}")
         print(f"Boundary Deduplications: {len(DEDUPLICATION_DECISIONS)}")
     print("-----------------------------\n")
 

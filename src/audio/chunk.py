@@ -182,7 +182,7 @@ def chunk_speaker_audio(
         if progress_reporter:
             progress_reporter.complete_chunk_prep(
                 speaker_id=speaker.speaker_id,
-                chunk_duration=c_duration,
+                chunk_duration=c_duration - (overlap_seconds if idx > 0 else 0.0),
                 is_regenerated=force_chunks
             )
 

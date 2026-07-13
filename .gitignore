@@ -75,3 +75,5 @@ test-5/
 .vscode/
 *.sublime-project
 *.sublime-workspace
+
+output_examples/

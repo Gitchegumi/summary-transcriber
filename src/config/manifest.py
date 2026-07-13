@@ -32,7 +32,8 @@ class TranscriptionConfig:
     model: str = "large-v3"
     device: str = "cuda"
     language: str = "en"
-    batch_size: int = 1
+    # Zero uses one simultaneous input per speaker track.
+    batch_size: int = 0
     precision: str = "float16"
     continue_on_error: bool = True
     retry_on_oom: bool = True

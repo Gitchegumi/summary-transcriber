@@ -33,8 +33,22 @@ def apply_corrections(turns: list[dict], glossary: GlossaryConfig) -> tuple[list
         text = turn["text_raw"]
         cleaned = text
         turn_corrections = []
-        for original, corrected in patterns.items():
-            pattern = re.compile(rf"\b{re.escape(original)}\b", flags=re.IGNORECASE)
+        # Prefer full aliases (for example, "Lady Ceres") over shorter
+        # aliases ("Ceres") so replacements do not duplicate titles.
+        ordered_patterns = sorted(patterns.items(), key=lambda item: len(item[0]), reverse=True)
+        for original, corrected in ordered_patterns:
+            prefix = ""
+            suffix = ""
+            if corrected.lower().endswith(original.lower()):
+                prefix = corrected[:-len(original)]
+            if corrected.lower().startswith(original.lower()):
+                suffix = corrected[len(original):]
+            prefix_guard = rf"(?<!{re.escape(prefix)})" if prefix else ""
+            suffix_guard = rf"(?!{re.escape(suffix)})" if suffix else ""
+            pattern = re.compile(
+                rf"{prefix_guard}\b{re.escape(original)}\b{suffix_guard}",
+                flags=re.IGNORECASE,
+            )
             if pattern.search(cleaned) and original.lower() != corrected.lower():
                 before = cleaned
                 cleaned = pattern.sub(corrected, cleaned)

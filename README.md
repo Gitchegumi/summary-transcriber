@@ -115,6 +115,7 @@ transcription:
   backend: "faster-whisper"
   model: "large-v3"
   device: "cuda"
+  batch_size: 0  # 0 = batch one current chunk from every speaker track
 
 progress:
   enabled: true
@@ -172,6 +173,8 @@ glossary:
 NVIDIA NeMo models (Parakeet/Canary) cannot ingest hours of raw audio without out-of-memory errors. The pipeline automatically splits long speaker tracks into **short audio chunks** (default: 60 seconds with 2 seconds overlap) before transcribing.
 *Whisper-based backends bypass this audio splitting step entirely.*
 
+Parakeet and Canary transcribe speaker tracks in round-robin batches through one shared model. With `batch_size: 0` (the default), a six-speaker manifest sends six chunks to each NeMo inference call. Set a positive value to cap simultaneous tracks when GPU memory is limited. If a batch fails, the pipeline records `batch_fallback_events` in raw output and retries each chunk through the existing 60s -> 30s -> 15s OOM recovery path.
+
 ### 2. Agent Transcript Chunking
 After chronological merging, the pipeline groups final turns into approximately **30-minute transcript chunks**.
 - Chunk boundaries are time-based but **never split a turn** (turns are assigned to a chunk using their start timestamp).
@@ -187,6 +190,9 @@ python transcribe.py --manifest session_manifest.yaml --mode draft
 ```
 Runs the audio downmixing, chunking, and local model transcription (ASR). Resolves turns chronologically, builds proper noun candidate lists, and writes initial draft records under `output/draft/`.
 
+Draft candidate review produces two complementary files under `output/draft/`:
+- `unknown_terms_report.csv`: detailed candidates and scoring evidence for review.
+- `candidate_glossary.yaml`: import-ready glossary entries.
 ### 2. Finalize Mode
 ```bash
 python transcribe.py --manifest session_manifest.yaml --mode finalize
@@ -209,6 +215,8 @@ Human-readable, chronological session transcript.
 
 #### `output/transcript_completeness_report.json`
 Details of session-wide transcription coverage.
+- Measures processed audio intervals from successful chunks; silent/empty chunks count as successfully processed.
+- Reports timestamp-derived speech and estimated silence separately from genuinely missing processing coverage.
 - Lists covered ranges, missing ranges, expected/successful/failed/empty chunk counts per speaker, and total missing seconds.
 
 ---
@@ -216,12 +224,14 @@ Details of session-wide transcription coverage.
 ### Agent Structured Exports (`output/agents/`)
 
 #### `output/agents/turns.jsonl`
-The canonical chronological transcript. One JSON object per turn containing:
-- Authoritative session, speaker, and character metadata.
-- Timestamps and source audio metrics.
-- `text.raw`: the untouched original output.
-- `text.cleaned`: glossary corrected text.
-- `text.markdown_cleaned`: filler-reduced text.
+The compact chronological transcript intended for narrative-summary agents. Empty turns are omitted. Each JSON object contains only:
+- `start_time`: the beginning of the turn as `HH:MM:SS.mmm`.
+- `end_time`: the end of the turn as `HH:MM:SS.mmm`; overlapping ranges represent simultaneous speech.
+- `speaker`: the player character name, `DM`, or display-name fallback.
+- `text`: glossary-corrected transcription text.
+- Consecutive segments from the same speaker are merged when separated by no more than 10 seconds.
+
+Detailed source, model, quality, and raw-text fields remain available in the canonical NocoDB and raw exports.
 
 #### `output/agents/session.json`
 Overall session and transcription metadata, including campaign details, model details, outputs manifest, and completeness reports (failed chunks and missing coverage ranges).

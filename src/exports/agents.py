@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 from datetime import datetime, timezone
 from src.config.manifest import SessionManifest
-from src.enrich.cleanup import clean_filler_words
 
 
 def export_agents(
@@ -26,28 +25,24 @@ def export_agents(
         shutil.rmtree(chunk_dir)
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
-    corrections_by_turn = {}
-    for correction in corrections:
-        corrections_by_turn.setdefault(correction["turn_id"], []).append(correction)
-
     # 1. Write agents/turns.jsonl
     turns_jsonl_path = output_dir / "turns.jsonl"
-    turn_payloads = []
     with turns_jsonl_path.open("w", encoding="utf-8", newline="\n") as f:
-        for turn in turns:
-            payload = _turn_payload(manifest, turn, corrections_by_turn)
+        for payload in _agent_payloads(manifest, turns):
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            turn_payloads.append(payload)
 
     # 2. Write agents/chunks/chunk_001.jsonl, etc.
-    turn_payload_map = {p["turn_id"]: p for p in turn_payloads}
+    turns_by_id = {turn["turn_id"]: turn for turn in turns}
     for chunk in chunks:
         chunk_file_name = f"{chunk['chunk_id']}.jsonl"
+        chunk_turns = [
+            turns_by_id[turn_id]
+            for turn_id in chunk["turn_ids"]
+            if turn_id in turns_by_id
+        ]
         with (chunk_dir / chunk_file_name).open("w", encoding="utf-8", newline="\n") as f:
-            for turn_id in chunk["turn_ids"]:
-                if turn_id in turn_payload_map:
-                    f.write(json.dumps(turn_payload_map[turn_id], ensure_ascii=False) + "\n")
-
+            for payload in _agent_payloads(manifest, chunk_turns):
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
     # 3. Write agents/chunks.jsonl (index)
     chunks_jsonl_path = output_dir / "chunks.jsonl"
     with chunks_jsonl_path.open("w", encoding="utf-8", newline="\n") as f:
@@ -202,50 +197,59 @@ def export_agents(
                 entity_idx += 1
 
 
-def _turn_payload(manifest: SessionManifest, turn: dict, corrections_by_turn: dict) -> dict:
-    turn_corrections = corrections_by_turn.get(turn["turn_id"], [])
-    raw_text = turn["text_raw"]
-    cleaned_text = turn["text_cleaned"]
-    markdown_cleaned = clean_filler_words(cleaned_text)
-    
+def _agent_payloads(
+    manifest: SessionManifest,
+    turns: list[dict],
+    max_gap_seconds: float = 10.0,
+) -> list[dict]:
+    merged: list[tuple[dict, float]] = []
+    for turn in turns:
+        payload = _turn_payload(manifest, turn)
+        if payload is None:
+            continue
+
+        start_seconds = float(turn["start_seconds"])
+        end_seconds = float(turn["end_seconds"])
+        if (
+            merged
+            and merged[-1][0]["speaker"] == payload["speaker"]
+            and start_seconds - merged[-1][1] <= max_gap_seconds
+        ):
+            previous, previous_end = merged[-1]
+            merged_end = max(previous_end, end_seconds)
+            previous["end_time"] = _format_timestamp(merged_end)
+            previous["text"] = f'{previous["text"]} {payload["text"]}'
+            merged[-1] = (previous, merged_end)
+        else:
+            merged.append((payload, end_seconds))
+
+    return [payload for payload, _ in merged]
+
+def _turn_payload(manifest: SessionManifest, turn: dict) -> dict | None:
+    text = turn["text_cleaned"].strip()
+    if not text:
+        return None
+
+    character_name = (turn.get("character_name") or "").strip()
+    role = _speaker_role(manifest, turn["speaker_id"])
+    speaker = character_name or (
+        "DM" if role and role.lower() == "dm" else turn["speaker_name"]
+    )
+
     return {
-        "session_id": manifest.session.id,
-        "turn_id": turn["turn_id"],
-        "speaker": {
-            "speaker_id": turn["speaker_id"],
-            "display_name": turn["speaker_name"],
-            "role": _speaker_role(manifest, turn["speaker_id"]),
-        },
-        "character": {
-            "name": turn["character_name"]
-        },
-        "time": {
-            "start_seconds": turn["start_seconds"],
-            "end_seconds": turn["end_seconds"],
-            "duration_seconds": turn["duration_seconds"],
-        },
-        "source": {
-            "source_file": turn["source_file"],
-            "backend": turn["backend"],
-            "model": turn["model"],
-            "chunk_id": turn.get("_chunk_id"),
-            "chunk_start_seconds": turn.get("_chunk_start"),
-            "chunk_end_seconds": turn.get("_chunk_end"),
-        },
-        "text": {
-            "raw": raw_text,
-            "cleaned": cleaned_text,
-            "markdown_cleaned": markdown_cleaned,
-        },
-        "quality": {
-            "confidence_avg": turn.get("confidence_avg"),
-            "coverage_status": "covered",
-            "warnings": [],
-        },
-        "glossary_correction_candidates": turn_corrections,
-        "tags": [],
+        "start_time": _format_timestamp(turn["start_seconds"]),
+        "end_time": _format_timestamp(turn["end_seconds"]),
+        "speaker": speaker,
+        "text": text,
     }
 
+
+def _format_timestamp(seconds: float) -> str:
+    total_milliseconds = max(0, round(float(seconds) * 1000))
+    hours, remainder = divmod(total_milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
 
 def _speaker_role(manifest: SessionManifest, speaker_id: str) -> str | None:
     return next((speaker.role for speaker in manifest.speakers if speaker.speaker_id == speaker_id), None)
