@@ -391,6 +391,37 @@ class TestV2Core(unittest.TestCase):
         self.assertEqual(dm_report["missing_ranges"], [[60.0, 100.0]])
         self.assertEqual(dm_report["total_missing_seconds"], 40.0)
         self.assertEqual(report["completeness_summary"]["status"], "complete_with_warnings")
+
+    def test_completeness_subtracts_retry_failure_from_parent_coverage(self) -> None:
+        self.manifest.speakers = [self.speaker1]
+        audio_reports = {"dm": {"duration_seconds": 60.0}}
+        raw_outputs = {"dm": {
+            "chunks": [{
+                "chunk_id": "dm_chunk_00001",
+                "chunk_start_seconds": 0.0,
+                "chunk_end_seconds": 60.0,
+                "raw_result": {"text": "partially transcribed"},
+            }],
+            "failed_chunks": [{
+                "chunk_id": "dm_chunk_00001_retry_30s_00_retry_15s_00",
+                "start_seconds": 0.0,
+                "end_seconds": 15.0,
+            }],
+        }}
+
+        report = compute_completeness_report(
+            self.manifest, [], audio_reports, raw_outputs
+        )
+
+        dm_report = report["speakers"]["dm"]
+        self.assertEqual(dm_report["chunks_failed"], 1)
+        self.assertEqual(dm_report["covered_ranges"], [[15.0, 60.0]])
+        self.assertEqual(dm_report["missing_ranges"], [[0.0, 15.0]])
+        self.assertEqual(dm_report["total_missing_seconds"], 15.0)
+        self.assertEqual(
+            report["completeness_summary"]["status"], "complete_with_warnings"
+        )
+
     def test_universal_table_chatter_is_stopword_noise(self) -> None:
         turns = []
         for index, term in enumerate(("Hang", "Look", "Hold", "Definitely"), start=1):

@@ -29,6 +29,32 @@ def _missing_ranges(covered: list[list[float]], duration: float) -> list[list[fl
     return missing
 
 
+def _subtract_ranges(
+    covered: list[list[float]], excluded: list[tuple[float, float]]
+) -> list[list[float]]:
+    remaining: list[list[float]] = []
+    excluded_ranges = _merge_ranges(excluded)
+
+    for covered_start, covered_end in _merge_ranges(
+        [(start, end) for start, end in covered]
+    ):
+        cursor = covered_start
+        for excluded_start, excluded_end in excluded_ranges:
+            if excluded_end <= cursor:
+                continue
+            if excluded_start >= covered_end:
+                break
+            if excluded_start > cursor:
+                remaining.append([cursor, min(excluded_start, covered_end)])
+            cursor = max(cursor, excluded_end)
+            if cursor >= covered_end:
+                break
+        if cursor < covered_end:
+            remaining.append([cursor, covered_end])
+
+    return remaining
+
+
 def compute_completeness_report(
     manifest: SessionManifest,
     turns: list[dict],
@@ -74,12 +100,25 @@ def compute_completeness_report(
             chunks_expected = len(chunk_ids | failed_ids)
 
             for chunk in chunks:
-                if chunk.get("chunk_id") in failed_ids:
+                chunk_id = chunk.get("chunk_id")
+                if chunk_id in failed_ids:
                     continue
                 start = float(chunk.get("chunk_start_seconds") or 0.0)
                 end = float(chunk.get("chunk_end_seconds") or start)
                 if end > start:
-                    processed_ranges.append([start, end])
+                    retry_failed_ranges = [
+                        (
+                            float(failure.get("start_seconds") or 0.0),
+                            float(failure.get("end_seconds") or 0.0),
+                        )
+                        for failure in failures
+                        if str(failure.get("chunk_id") or "").startswith(
+                            f"{chunk_id}_retry_"
+                        )
+                    ]
+                    processed_ranges.extend(
+                        _subtract_ranges([[start, end]], retry_failed_ranges)
+                    )
                 chunks_success += 1
 
                 raw_result = chunk.get("raw_result") or {}
